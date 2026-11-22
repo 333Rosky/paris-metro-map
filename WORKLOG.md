@@ -15,7 +15,8 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 
 ## Status (2026-11-22)
 - Pipeline, map, station boards, train detail, playback, line filters done.
-- E2E: 7 tests pass locally (desktop + mobile), evidence screenshots in test-results/.
+- E2E: 7 tests pass locally and in CI (desktop + mobile); evidence uploaded as the `e2e-evidence` workflow artifact.
+- Live: https://333rosky.github.io/paris-metro-map/ (deployed and checked in Chromium, no console errors).
 
 ## Next
 - Real-time positions via PRIM; RER/tram; train orientation.
