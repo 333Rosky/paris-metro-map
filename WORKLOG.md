@@ -39,12 +39,17 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - Site: `VITE_REALTIME_URL` (repository variable `REALTIME_URL` in CI) switches to relay mode: no key dialog, the stored key is never sent to the relay, trains fall back to the timetable when no snapshot younger than 4 min is available (also applies to direct PRIM mode).
 - Verified locally against the real PRIM feed (22:48): refresh in 1.6 s, 597 metro journeys, 43 KB; site through the relay shows 187 real-time trains on 15 lines, line 6 from the timetable, no key requested or sent.
 
+## Relay on AWS (2026-11-23)
+- Deployed: stack `paris-metro-relay` in eu-west-3 (Lambda function URL, DynamoDB table 10/10, SSM SecureString `/paris-metro-relay/prim-api-key`, 14-day log group), from the `paris-metro` AWS profile (same account as `vega-honours` / `statarena`, root console session).
+- URL: https://bml7tq677ufemquxeepkabhoiu0emdjx.lambda-url.eu-west-3.on.aws/ , set as the repository variable `REALTIME_URL`.
+- Free tier checked on the account before creating anything (`aws freetier get-free-tier-usage`, 22 Nov): Lambda 27k / 400k GB-s and 107k / 1M requests used this month by other projects, CloudWatch 0.12 / 5 GB, KMS 5.9k / 20k requests, no DynamoDB table anywhere in eu-west-3. All offers reported as "Always Free"; the account predates the 2025 free/paid plans.
+- Verified on AWS: stored key equals `.env`; cold first call 1.9 s (PRIM fetched in ~1 s), then ~0.2 s; key absent from body and headers; one CORS header; 405/404/204 as designed; 8 simultaneous requests on a due snapshot across 10 instances made exactly one PRIM request.
+- Limit found: the account allows 10 concurrent Lambda executions in eu-west-3, so 12 simultaneous requests got one 429. The site now retries a failed relay request quietly twice (5 s, 10 s) before showing an error.
+- AWS sign-in on this machine: `aws login --profile paris-metro --region us-east-2 --remote`, link opened in a private Chrome window, code pasted back by the user. The default flow (redirect to 127.0.0.1) cannot work from WSL here.
+
 ## Status
-- 24 E2E tests pass locally (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
-- Relay not hosted yet. Both existing AWS profiles (`vega-honours`, `statarena`) are the same account with an expired session. `relay/lambda.mjs` and `relay/aws/` are written but never run on AWS: uncommitted until a deploy proves them.
-- AWS sign-in from this machine (2026-11-22, not solved): the user's browser answered AWS's 400 page on every attempt. Verified: `aws login` (redirect to 127.0.0.1) cannot work here, Windows does not reach WSL ports on 127.0.0.1 (it does on the WSL address); a link cut at the first `&` reproduces that 400 page; the same links reach the sign-in page from WSL without cookies. Last attempt, outcome unknown: `aws login --profile paris-metro --region us-east-2 --remote` (the earlier working session was issued by us-east-2) opened in a private Chrome window. The user then answered "Non c bon" without a code: no session exists, sign-in stopped.
+- 25 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
 
 ## Next
-- Ask the user whether to continue with AWS or stop there. Nothing exists on AWS.
-- If AWS: get a session (`--remote`, code pasted back), check the account's free-tier usage (`aws freetier get-free-tier-usage`) and existing DynamoDB tables in eu-west-3 before creating anything; then `AWS_PROFILE=paris-metro relay/aws/deploy.sh`, `gh variable set REALTIME_URL`, redeploy the site, check production without a key, commit the AWS files.
 - Later: RER/tram; PRIM disruptions on the line view.
+- If the AWS session expires: sign in again with the `--remote` command above before running `relay/aws/deploy.sh`.

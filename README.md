@@ -33,11 +33,13 @@ PRIM exige une clé, limitée à 1 000 requêtes par jour, et sa réponse couvre
 
 ### Avec un relais : aucun visiteur n'a besoin de clé
 
+Le site publié lit un relais : « Direct » y fonctionne sans clé.
+
 Le relais (`relay/`) garde la clé côté serveur et sert à tous les visiteurs la partie métro du flux :
 
 - il n'interroge PRIM que lorsqu'un visiteur le demande, et au plus une fois toutes les 90 secondes (960 requêtes par jour au maximum, quel que soit le nombre de visiteurs) ;
 - il ne conserve que les 16 lignes de métro et les champs lus par la carte : environ 45 Ko compressés au lieu de 2,6 Mo, dans le même format SIRI Lite ;
-- si PRIM ne répond plus, il sert le dernier instantané pendant 5 minutes au plus, puis répond 503 ; la carte revient alors aux horaires théoriques et l'indique ;
+- si PRIM ne répond plus, il sert le dernier instantané pendant 5 minutes au plus, puis répond 503 ; la carte revient alors aux horaires théoriques et l'indique. Un refus isolé du relais est retenté discrètement avant d'être signalé ;
 - la clé n'apparaît dans aucune réponse, et une clé enregistrée dans le navigateur n'est jamais envoyée au relais.
 
 ```bash
@@ -46,6 +48,21 @@ VITE_REALTIME_URL=http://localhost:8787/ npm run dev      # le site lit le relai
 ```
 
 Le relais est un serveur Node sans dépendance (`relay/server.mjs`) : il tourne sur tout hébergeur qui garde un processus en vie. Variables : `PRIM_API_KEY` (obligatoire), `PORT`, `REFRESH_SECONDS` (90, jamais moins de 87 face à PRIM), `MAX_STALE_SECONDS` (300). Le site publié lit l'adresse du relais dans `VITE_REALTIME_URL` au moment du build ; le workflow la prend dans la variable de dépôt `REALTIME_URL`.
+
+#### Héberger le relais sur AWS
+
+`relay/aws/` le déploie comme fonction Lambda derrière une URL de fonction (`relay/lambda.mjs`) :
+
+```bash
+AWS_PROFILE=… relay/aws/deploy.sh          # lit PRIM_API_KEY dans .env, région eu-west-3 par défaut
+gh variable set REALTIME_URL --body "<adresse affichée par le script>"
+```
+
+- La clé va dans Parameter Store (`SecureString`) ; la fonction la lit au démarrage.
+- Plusieurs instances peuvent tourner en même temps : le dernier instantané et le droit d'interroger PRIM sont partagés dans une table DynamoDB, par une écriture conditionnelle. Vérifié en production : huit requêtes simultanées sur un instantané périmé n'ont coûté qu'une requête à PRIM.
+- Les services sont choisis pour tenir dans les franchises mensuelles gratuites d'AWS : Lambda (1 million de requêtes, 400 000 Go-secondes), DynamoDB en capacité provisionnée (25 unités de lecture et d'écriture par région, la table en réserve 10 et 10), journaux CloudWatch (5 Go, conservés 14 jours), 100 Go de trafic sortant. Ces franchises sont partagées avec tout ce qui tourne déjà sur le compte : `aws freetier get-free-tier-usage` montre où il en est.
+- L'adresse est publique : au-delà des franchises, l'usage est facturé.
+- Pour tout retirer : `aws cloudformation delete-stack --stack-name paris-metro-relay` puis `aws ssm delete-parameter --name /paris-metro-relay/prim-api-key`.
 
 ### Sans relais : une clé personnelle
 
@@ -111,7 +128,7 @@ Les tests de bout en bout chargent l'application dans Chromium à des instants f
 
 Le mode direct est testé sans appeler PRIM : contre un flux simulé à partir des horaires (2 minutes de retard), contre une clé refusée, et contre une capture réelle du flux (`tests/fixtures/`, partie métro uniquement, données IDFM sous licence ODbL).
 
-Le relais est testé de bout en bout (`tests/relay.spec.ts`) : un faux PRIM local (`tests/fake-prim.mjs`) sert la capture noyée parmi d'autres lignes, le relais tourne devant lui, et un second build du site lit ce relais. Les tests vérifient que la clé ne sort jamais, qu'une rafale de visiteurs ne coûte qu'une requête à PRIM, le comportement quand PRIM échoue puis revient, et le retour de la carte aux horaires quand le relais ne répond plus.
+Le relais est testé de bout en bout (`tests/relay.spec.ts`) : un faux PRIM local (`tests/fake-prim.mjs`) sert la capture noyée parmi d'autres lignes, le relais tourne devant lui, et un second build du site lit ce relais. Les tests vérifient que la clé ne sort jamais, qu'une rafale de visiteurs ne coûte qu'une requête à PRIM, le comportement quand PRIM échoue puis revient, et le retour de la carte aux horaires quand le relais ne répond plus. La variante AWS (`relay/lambda.mjs`) n'a pas de test automatique : elle a été vérifiée sur AWS, à la main, lors de son déploiement.
 
 ## Déploiement
 

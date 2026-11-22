@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Real-time relay for paris-metro-map: a Lambda function URL that serves the
+  metro part of the PRIM feed, holding the API key server-side.
+
+Parameters:
+  KeyParameter:
+    Type: String
+    Default: /paris-metro-relay/prim-api-key
+    Description: Name of the SSM SecureString parameter that holds the PRIM API key.
+  RefreshSeconds:
+    Type: Number
+    Default: 90
+    MinValue: 87
+    Description: Minimum time between two PRIM requests (1 000 a day is one every 86.4 s).
+
+Resources:
+  # Last snapshot and the claim on the upstream budget, shared by all instances.
+  # Provisioned at 10/10: the DynamoDB free tier covers 25/25 per Region. A
+  # snapshot write is larger than 10 units and draws on the capacity left
+  # unused since the previous one (DynamoDB keeps up to five minutes of it).
+  State:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 10
+        WriteCapacityUnits: 10
+
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: relay
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt State.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${KeyParameter}
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Runtime: nodejs22.x
+      Handler: lambda.handler
+      MemorySize: 1024
+      Timeout: 40
+      Role: !GetAtt Role.Arn
+      LoggingConfig:
+        LogGroup: !Ref Logs
+      Environment:
+        Variables:
+          TABLE: !Ref State
+          KEY_PARAMETER: !Ref KeyParameter
+          REFRESH_SECONDS: !Ref RefreshSeconds
+      # Placeholder: deploy.sh uploads relay/core.mjs and relay/lambda.mjs right after.
+      Code:
+        ZipFile: |
+          exports.handler = async () => ({ statusCode: 503, body: "not deployed yet" });
+
+  Url:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt Function.Arn
+      # No Cors block: the relay sets its own CORS headers, and two sources would duplicate them.
+
+  # A public function URL needs both statements (AWS, October 2025).
+  UrlAccess:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+  UrlInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  Url:
+    Description: Value for VITE_REALTIME_URL
+    Value: !GetAtt Url.FunctionUrl
+  Function:
+    Value: !Ref Function
+  Table:
+    Value: !Ref State

@@ -25,6 +25,9 @@ const REFRESH_MS = 60_000; // PRIM refreshes once a minute
 const BACKOFF_MS = 5 * 60_000;
 /** Without a snapshot younger than this, trains fall back to the timetable. */
 const STALE_MS = 4 * 60_000;
+/** A relay hiccup (cold start, throttling) is retried quietly before it is reported. */
+const QUIET_RETRIES = 2;
+const QUIET_RETRY_MS = 5_000;
 const KEY_STORAGE = "prim-api-key";
 
 /** Predictions further ahead than this say little about where the train is now. */
@@ -281,6 +284,7 @@ export class RealtimeFeed {
   private byId = new Map<string, RtTrain>();
   private timer: number | undefined;
   private expiry: number | undefined;
+  private failures = 0;
   private running = false;
   private worker: Worker | undefined;
   private refs: SiriRefs;
@@ -330,6 +334,7 @@ export class RealtimeFeed {
   clear(): void {
     this.stop();
     this.drop();
+    this.failures = 0;
     this.status = { kind: "off" };
   }
 
@@ -376,7 +381,11 @@ export class RealtimeFeed {
   private receive(result: FetchResult): void {
     if (!this.running) return;
     if (!result.ok) {
-      if (this.relay) return this.fail("Temps réel indisponible", false, REFRESH_MS);
+      if (this.relay) {
+        this.failures++;
+        if (this.failures <= QUIET_RETRIES) return this.schedule(QUIET_RETRY_MS * this.failures);
+        return this.fail("Temps réel indisponible", false, REFRESH_MS);
+      }
       const auth = result.status === 401 || result.status === 403;
       const message = auth
         ? "Clé API refusée par PRIM"
@@ -387,6 +396,7 @@ export class RealtimeFeed {
             : `PRIM indisponible (${result.status})`;
       return this.fail(message, auth, result.status === 429 ? BACKOFF_MS : REFRESH_MS);
     }
+    this.failures = 0;
     const now = Date.now();
     if (result.stamp !== null && now - result.stamp > STALE_MS) {
       // An old snapshot only knows trains that have since moved on.

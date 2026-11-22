@@ -14,6 +14,7 @@ import { KEY, MAX_STALE_SECONDS, REFRESH_SECONDS, RELAY, SITE, UPSTREAM } from "
 //                                              then 503 naming the cause, no retry storm
 //   - PRIM recovers                         -> fresh data on the next window
 //   - a visitor has an old key in storage   -> it is not sent to the relay
+//   - the relay refuses one request         -> retried quietly, no error shown
 //   - the relay is down                     -> the map stays on the timetable and says so
 //   - the relay stops answering later       -> trains return to the timetable within minutes
 //   - the relay hands out an old snapshot   -> refused: old predictions misplace trains
@@ -188,11 +189,30 @@ test("with a relay, Direct is real time for every visitor, with no key asked or 
   await page.screenshot({ path: info.outputPath("relay-live.png") });
 });
 
+test("a single refused request is retried quietly", async ({ page }) => {
+  test.slow(); // the retry adds five seconds to a live page under software WebGL
+  // What AWS answers when more requests arrive at once than the account may run.
+  await page.clock.setFixedTime(capturedAt);
+  let requests = 0;
+  await page.route(RELAY + "**", (route) =>
+    requests++ === 0
+      ? route.fulfill({ status: 429, json: { Message: "Rate Exceeded." }, headers: { "access-control-allow-origin": "*" } })
+      : route.continue(),
+  );
+  await page.goto(SITE + "?live");
+  await page.waitForFunction(() => (window as any).metro?.state.realtime, null, { timeout: 20_000 });
+  expect(requests).toBeGreaterThanOrEqual(2);
+  await expect(page.locator("#rt-error")).toBeHidden();
+  await expect(page.locator("#live")).toHaveAttribute("data-state", "ok");
+});
+
 test("when the relay is unavailable the map stays on the timetable and says so", async ({ page }, info) => {
+  test.slow(); // two quiet retries come before the error
   await page.clock.setFixedTime(capturedAt);
   await page.route(RELAY + "**", (route) => route.fulfill(unavailable));
   await page.goto(SITE + "?live");
-  await expect(page.locator("#rt-error")).toBeVisible();
+  // Two quiet retries (5 s, then 10 s) come before the error is shown.
+  await expect(page.locator("#rt-error")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("#rt-error")).toContainText("Temps réel indisponible");
   await expect(page.locator("#rt-error button")).toBeHidden();
   await expect(page.locator("#live")).toHaveAttribute("data-state", "error");
@@ -211,7 +231,7 @@ test("when the relay stops answering, trains return to the timetable", async ({ 
 
   await page.route(RELAY + "**", (route) => route.fulfill(unavailable));
   await page.clock.fastForward("04:30");
-  await expect(page.locator("#rt-error")).toContainText("Temps réel indisponible");
+  await expect(page.locator("#rt-error")).toContainText("Temps réel indisponible", { timeout: 30_000 });
   await timetableOnly(page);
 });
 
