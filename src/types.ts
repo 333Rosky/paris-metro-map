@@ -1,5 +1,7 @@
 export interface Line {
   id: string;
+  /** IDFM route id without prefix, as in SIRI LineRef (e.g. "C01371"). */
+  ref: string;
   name: string;
   color: string;
   text: string;
@@ -22,6 +24,8 @@ export interface Network {
   lines: Line[];
   shapes: Shape[];
   stations: Station[];
+  /** Numeric SIRI stop code (platform or stop area) -> station index. */
+  stopRefs: Record<string, number>;
 }
 
 /** A sequence of stops shared by many trips; times are offsets from the first departure. */

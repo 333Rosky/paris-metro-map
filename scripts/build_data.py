@@ -168,6 +168,8 @@ def build(gtfs_path: Path, out_dir: Path) -> None:
         r = next(r for r in routes.values() if r["route_short_name"] == n)
         lines.append({
             "id": n,
+            # SIRI LineRef is "STIF:Line::<ref>:"
+            "ref": r["route_id"].split(":", 1)[-1],
             "name": f"Métro {n.replace('B', 'bis')}",
             "color": "#" + (r["route_color"] or "888888"),
             "text": "#" + (r["route_text_color"] or "FFFFFF"),
@@ -330,7 +332,17 @@ def build(gtfs_path: Path, out_dir: Path) -> None:
     # Output ---------------------------------------------------------------
     for s in stations:
         s["lines"] = sorted(s["lines"])
-    network = {"lines": lines, "shapes": shapes_out, "stations": stations}
+    # SIRI StopPointRef "STIF:StopPoint:Q:<code>:" uses the numeric part of the
+    # GTFS platform id; StopAreaRef uses the parent station's.
+    stop_refs = {}
+    for stop_id, s in stops.items():
+        idx = station_index.get(s["parent_station"] or stop_id)
+        if idx is None:
+            continue
+        stop_refs[stop_id.split(":")[-1]] = idx
+        if s["parent_station"]:
+            stop_refs.setdefault(s["parent_station"].split(":")[-1], idx)
+    network = {"lines": lines, "shapes": shapes_out, "stations": stations, "stopRefs": stop_refs}
     timetable = {
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "source": GTFS_URL,

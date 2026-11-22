@@ -5,12 +5,24 @@ Carte animée de toutes les rames du métro parisien (lignes 1 à 14, 3bis et 7b
 ![Le réseau à 8 h 30 un mardi : 560 rames en circulation](docs/screenshot.png)
 
 - **Toutes les rames** positionnées sur le tracé réel des lignes, avec accélération au départ et freinage à l'approche des stations.
-- **Le temps** : lecture, pause, vitesses ×1 à ×300, curseur sur la journée, choix du jour, bouton « Maintenant ».
+- **Le temps** : lecture, pause, vitesses ×1 à ×300, curseur sur la journée, choix du jour.
 - **Les stations** : un clic affiche les prochains passages avec heure d'arrivée, heure de départ et direction.
 - **Les rames** : un clic affiche la mission complète (arrêts franchis, arrêt en cours, horaires) ; « Suivre » garde la rame au centre.
 - **Les lignes** : un clic sur une pastille masque la ligne ; Maj + clic l'isole.
+- **Le direct** : le bouton « Direct » cale la carte sur l'heure de Paris et, avec une clé API PRIM, place les rames d'après les prochains passages prévus en temps réel.
 
-Les positions sont **théoriques** : elles découlent des horaires planifiés (GTFS), pas de la position temps réel des rames.
+Hors mode direct, les positions sont **théoriques** : elles découlent des horaires planifiés (GTFS).
+
+## Temps réel
+
+Le métro ne publie pas de position GPS. L'API [PRIM](https://prim.iledefrance-mobilites.fr/) d'Île-de-France Mobilités (`estimated-timetable`, format SIRI Lite) donne, pour chaque rame en circulation, l'heure d'arrivée et de départ prévue à ses prochains arrêts. La position est interpolée entre l'arrêt précédent et le suivant, le long du tracé GTFS.
+
+1. Créer un compte gratuit sur PRIM et générer un jeton API.
+2. Cliquer sur « Direct » et coller la clé. Elle reste dans le navigateur (`localStorage`) et n'est envoyée qu'à PRIM, dans l'en-tête `apikey`.
+
+Le flux est interrogé une fois par minute (rythme de mise à jour de PRIM ; un jeton récent est limité à environ 1 000 requêtes par jour). Les lignes absentes du flux restent affichées d'après l'horaire théorique, en transparence.
+
+Pour servir le temps réel à tous les visiteurs sans clé, définir `VITE_REALTIME_URL` au build vers un proxy qui ajoute la clé côté serveur et renvoie la même réponse SIRI.
 
 ## Lancer en local
 
@@ -40,6 +52,7 @@ IDFM GTFS (zip) ──► scripts/build_data.py ──► public/data/network.js
                                                         │
                                                         ▼
                          src/schedule.ts   rames actives à l'instant t, tableaux de passages
+                         src/realtime.ts   flux PRIM SIRI, position des rames en direct
                          src/geo.ts        position le long du tracé
                          src/main.ts       carte MapLibre, animation, interface
 ```
@@ -55,7 +68,7 @@ npx playwright install chromium
 npx playwright test
 ```
 
-Les tests de bout en bout chargent l'application dans Chromium à des instants fixés (heure de pointe, après minuit), vérifient le nombre de rames, les tableaux de passages, le clic sur une rame, l'animation et les filtres de ligne, et enregistrent des captures dans `test-results/` (rapport : `npx playwright show-report`).
+Les tests de bout en bout chargent l'application dans Chromium à des instants fixés (heure de pointe, après minuit), vérifient le nombre de rames, les tableaux de passages, le clic sur une rame, l'animation et les filtres de ligne, et enregistrent des captures dans `test-results/` (rapport : `npx playwright show-report`). Le mode direct est testé contre une réponse PRIM simulée, construite à partir des horaires avec un retard de 2 minutes, ainsi que contre une clé refusée.
 
 ## Déploiement
 
@@ -63,7 +76,7 @@ Le workflow GitHub Actions régénère les données chaque matin depuis le flux 
 
 ## Pistes
 
-- Position temps réel via l'API PRIM d'IDFM (clé d'API requise).
+- Proxy partagé (Cloudflare Worker ou équivalent) pour le temps réel sans clé côté visiteur.
 - RER, tramways et Transilien (même pipeline, autres `route_type`).
 - Rames orientées selon le sens de marche.
 

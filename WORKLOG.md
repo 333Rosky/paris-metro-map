@@ -18,5 +18,12 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - E2E: 7 tests pass locally and in CI (desktop + mobile); evidence uploaded as the `e2e-evidence` workflow artifact.
 - Live: https://333rosky.github.io/paris-metro-map/ (deployed and checked in Chromium, no console errors).
 
+## Real time (2026-11-22)
+- Source: PRIM `marketplace/estimated-timetable` (SIRI Lite JSON, `apikey` header, CORS `*` verified). No GPS for the metro: positions interpolated between previous and next call along GTFS shapes.
+- Key handling: user's own PRIM key in localStorage (static Pages, no secret in repo). Optional `VITE_REALTIME_URL` for a key-holding proxy (not built yet).
+- Lines missing from the feed fall back to scheduled positions, drawn translucent.
+- Verified with a simulated feed (E2E). NOT yet verified against the live PRIM feed: needs a PRIM key; quota for recent tokens reportedly ~1000/day (docs blocked to bots, figure unconfirmed).
+
 ## Next
-- Real-time positions via PRIM; RER/tram; train orientation.
+- Live check with a real PRIM key (payload size, metro coverage, StopPointRef codes).
+- Shared proxy so visitors get real time without a key; RER/tram; train orientation.

@@ -5,6 +5,18 @@ import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "./style.css";
 import { measure, pointAt, type MeasuredShape } from "./geo";
 import { DAY, Schedule, shiftDate, type TrainState } from "./schedule";
+import {
+  PRIM_URL,
+  RealtimeFeed,
+  Track,
+  loadKey,
+  locate,
+  rtBoard,
+  saveKey,
+  trainAt,
+  type RtJourney,
+  type RtTrain,
+} from "./realtime";
 import type { Line, Network, Timetable } from "./types";
 
 // MapLibre 6 resolves its worker at runtime; let Vite emit it as an asset.
@@ -97,6 +109,23 @@ async function main() {
   let ready = false;
   schedule.tripsFor(date);
 
+  // Real time ----------------------------------------------------------------
+  // Live mode pins the clock to Paris time and, when a PRIM feed answers,
+  // positions trains from predicted passage times instead of the timetable.
+  let live = false;
+  let anchor = { ms: Date.now(), t, date };
+  const track = new Track(timetable);
+  const feed = new RealtimeFeed(network, import.meta.env.VITE_REALTIME_URL || PRIM_URL, loadKey(), () => {
+    syncLive();
+    dirty = true;
+  });
+  /** Lines the feed currently covers; others keep scheduled positions. */
+  let rtLines = new Set<number>();
+  let rtById = new Map<string, RtJourney>();
+  const realtime = () => live && feed.journeys.length > 0;
+  /** Epoch ms -> seconds since midnight of the displayed day (live mode only). */
+  const msToT = (ms: number) => t + (ms - Date.now()) / 1000;
+
   // Controls ---------------------------------------------------------------
   const dateSel = $<HTMLSelectElement>("date");
   dateSel.innerHTML = schedule.dates.map((d) => `<option value="${d}">${dateLabel(d)}</option>`).join("");
@@ -126,24 +155,108 @@ async function main() {
     }
   };
 
+  const liveBtn = $<HTMLButtonElement>("live");
+  const rtError = $("rt-error");
+  const keyDialog = $<HTMLDialogElement>("key-dialog");
+  const keyInput = $<HTMLInputElement>("key-input");
+
+  function syncLive() {
+    const st = feed.status;
+    liveBtn.classList.toggle("on", live);
+    liveBtn.dataset.state = !live ? "off" : st.kind === "ok" ? "ok" : st.kind === "error" ? "error" : feed.configured ? "loading" : "off";
+    liveBtn.title = !live
+      ? "Revenir à l'heure actuelle"
+      : st.kind === "ok"
+        ? `Temps réel · ${st.journeys} missions · ${new Date(st.at).toLocaleTimeString("fr-FR")}`
+        : st.kind === "error"
+          ? st.message
+          : feed.configured
+            ? "Connexion au temps réel…"
+            : "Horaires théoriques";
+    const showError = live && st.kind === "error";
+    rtError.hidden = !showError;
+    if (showError) {
+      rtError.querySelector("span")!.textContent = st.message;
+    }
+    rtLines = new Set(feed.journeys.map((j) => j.line));
+    rtById = new Map(feed.journeys.map((j) => [`rt:${j.id}`, j]));
+  }
+
+  function enterLive() {
+    const n = parisNow();
+    setDate(nearestDate(n.date));
+    t = n.t;
+    anchor = { ms: Date.now(), t, date };
+    speed = 1;
+    playing = true;
+    live = true;
+    if (feed.configured) feed.start();
+    syncControls();
+    syncLive();
+  }
+
+  function exitLive() {
+    if (!live) return;
+    live = false;
+    feed.stop();
+    if (selection?.kind === "train" && selection.id.startsWith("rt:")) selection = null;
+    syncLive();
+    renderInfo(true);
+  }
+
+  function openKeyDialog() {
+    keyInput.value = feed.key;
+    keyDialog.querySelector<HTMLButtonElement>("#key-forget")!.hidden = !feed.key;
+    keyDialog.showModal();
+  }
+
+  keyDialog.addEventListener("close", () => {
+    const action = keyDialog.returnValue;
+    if (action === "save" && keyInput.value.trim()) {
+      feed.key = keyInput.value.trim();
+      saveKey(feed.key);
+      if (live) feed.restart();
+      else enterLive();
+    } else if (action === "forget") {
+      feed.key = "";
+      saveKey("");
+      feed.stop();
+      feed.journeys = [];
+      feed.status = { kind: "off" };
+      syncLive();
+    } else if (action === "schedule") {
+      enterLive();
+    }
+    dirty = true;
+  });
+
+  liveBtn.addEventListener("click", () => {
+    if (live || !feed.configured) openKeyDialog();
+    else enterLive();
+  });
+  rtError.querySelector("button")!.addEventListener("click", openKeyDialog);
+
   const setDate = (d: string) => {
     date = d;
     schedule.tripsFor(date);
-    if (selection?.kind === "train" && !schedule.findTrip(selection.id)) selection = null;
+    if (selection?.kind === "train" && !selection.id.startsWith("rt:") && !schedule.findTrip(selection.id)) selection = null;
     dirty = true;
   };
 
   dateSel.addEventListener("change", () => {
+    exitLive();
     setDate(dateSel.value);
     syncControls();
   });
   slider.addEventListener("input", () => {
+    exitLive();
     scrubbing = true;
     t = +slider.value;
     dirty = true;
   });
   slider.addEventListener("change", () => (scrubbing = false));
   const togglePlay = () => {
+    exitLive();
     playing = !playing;
     syncControls();
   };
@@ -151,15 +264,8 @@ async function main() {
   speedsEl.addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-speed]");
     if (!b) return;
+    exitLive();
     speed = +b.dataset.speed!;
-    playing = true;
-    syncControls();
-  });
-  $("now").addEventListener("click", () => {
-    const n = parisNow();
-    setDate(nearestDate(n.date));
-    t = n.t;
-    speed = 1;
     playing = true;
     syncControls();
   });
@@ -301,6 +407,8 @@ async function main() {
       paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3, 13, 5.5, 16, 9],
         "circle-color": ["get", "color"],
+        "circle-opacity": ["case", ["get", "est"], 0.4, 1],
+        "circle-stroke-opacity": ["case", ["get", "est"], 0.4, 1],
         "circle-stroke-color": "#ffffff",
         "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1.4],
       },
@@ -366,6 +474,15 @@ async function main() {
     dirty = true;
   }
 
+  // Only touch the DOM when the content changes: rebuilding rows under the
+  // pointer would swallow clicks while the clock runs.
+  let lastInfoHtml = "";
+  function setInfo(html: string) {
+    if (html === lastInfoHtml) return;
+    lastInfoHtml = html;
+    infoBody.innerHTML = html;
+  }
+
   let lastInfoRender = 0;
   function renderInfo(force = false) {
     const now = performance.now();
@@ -376,27 +493,63 @@ async function main() {
 
     if (selection.kind === "station") {
       const st = stations[selection.index];
-      const events = schedule.board(selection.index, t);
-      const rows = events
-        .map((ev) => {
-          const line = lines[ev.pattern.line];
-          const atQuay = ev.arr <= t;
-          return `<tr data-trip="${ev.trip.id}">
-            <td>${badge(line, "sm")}</td>
-            <td class="dir">${ev.terminus ? "Terminus" : escapeHtml(ev.pattern.headsign)}</td>
-            <td class="num">${ev.origin ? "—" : hhmm(ev.arr)}</td>
-            <td class="num">${ev.terminus ? "—" : hhmm(ev.dep)}</td>
-            <td class="num wait">${atQuay ? "à quai" : countdown(ev.arr, t)}</td>
+      type Row = { id: string; line: number; dest: string; arr: number | null; dep: number | null; rt: boolean };
+      const rows: Row[] = [];
+      if (realtime()) {
+        for (const r of rtBoard(feed.journeys, selection.index, Date.now())) {
+          rows.push({
+            id: `rt:${r.journey.id}`,
+            line: r.journey.line,
+            dest: r.terminus ? "Terminus" : r.journey.destination,
+            arr: msToT(r.arr),
+            dep: r.terminus ? null : msToT(r.dep),
+            rt: true,
+          });
+        }
+      }
+      for (const ev of schedule.board(selection.index, t)) {
+        if (realtime() && rtLines.has(ev.pattern.line)) continue;
+        rows.push({
+          id: ev.trip.id,
+          line: ev.pattern.line,
+          dest: ev.terminus ? "Terminus" : ev.pattern.headsign,
+          arr: ev.origin ? null : ev.arr,
+          dep: ev.terminus ? null : ev.dep,
+          rt: false,
+        });
+      }
+      rows.sort((a, b) => (a.arr ?? a.dep!) - (b.arr ?? b.dep!));
+      const html = rows
+        .slice(0, 14)
+        .map((r) => {
+          const first = r.arr ?? r.dep!;
+          return `<tr data-trip="${escapeHtml(r.id)}" class="${r.rt ? "rt" : ""}">
+            <td>${badge(lines[r.line], "sm")}</td>
+            <td class="dir">${escapeHtml(r.dest)}</td>
+            <td class="num">${r.arr === null ? "—" : hhmm(r.arr)}</td>
+            <td class="num">${r.dep === null ? "—" : hhmm(r.dep)}</td>
+            <td class="num wait">${first <= t ? "à quai" : countdown(first, t)}</td>
           </tr>`;
         })
         .join("");
-      infoBody.innerHTML = `
+      setInfo(`
         <header><h2>${escapeHtml(st.name)}</h2><div class="badges">${st.lines.map((l) => badge(lines[l], "sm")).join("")}</div></header>
         ${
-          events.length
-            ? `<div class="scroll"><table class="board"><thead><tr><th></th><th>Direction</th><th>Arr.</th><th>Dép.</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          rows.length
+            ? `<div class="scroll"><table class="board"><thead><tr><th></th><th>Direction</th><th>Arr.</th><th>Dép.</th><th></th></tr></thead><tbody>${html}</tbody></table></div>`
             : `<p class="empty">Aucun passage d'ici la fin de service.</p>`
-        }`;
+        }`);
+      return;
+    }
+
+    if (selection.id.startsWith("rt:")) {
+      const j = rtById.get(selection.id);
+      if (!j) {
+        selection = null;
+        info.hidden = true;
+        return;
+      }
+      renderRtTrain(j);
       return;
     }
 
@@ -426,10 +579,42 @@ async function main() {
       : state.dwelling
         ? `À quai · ${escapeHtml(stations[p.stops[state.stop]].name)}`
         : `Vers ${escapeHtml(stations[p.stops[state.stop + 1]].name)} · ${countdown(trip.start + p.arr[state.stop + 1], t)}`;
-    infoBody.innerHTML = `
+    setInfo(`
       <header>${badge(line)}<h2>${escapeHtml(p.headsign)}</h2></header>
       <div class="status"><span>${status}</span>${state ? `<button id="follow" class="text-btn ${follow ? "on" : ""}" aria-pressed="${follow}">Suivre</button>` : ""}</div>
-      <div class="scroll"><ol class="stops" style="--c:${line.color}">${items}</ol></div>`;
+      <div class="scroll"><ol class="stops" style="--c:${line.color}">${items}</ol></div>`);
+  }
+
+  function renderRtTrain(j: RtJourney) {
+    const line = lines[j.line];
+    const now = Date.now();
+    const state = trainAt(j, track, now);
+    const next = state ? state.next : j.calls.findIndex((c) => c.dep >= now);
+    const items: string[] = [];
+    if (state?.from != null && state.from !== j.calls[0].station && next === 0) {
+      items.push(
+        `<li class="past" data-station="${state.from}"><span class="dot"></span><span class="name">${escapeHtml(stations[state.from].name)}</span><span class="num"></span></li>`,
+      );
+    }
+    j.calls.forEach((c, k) => {
+      const cls = k < next ? "past" : k === next && state?.dwelling ? "here" : "";
+      const arr = msToT(c.arr);
+      const dep = msToT(c.dep);
+      const time = Math.floor(arr / 60) === Math.floor(dep / 60) || k === j.calls.length - 1 ? hhmm(arr) : `${hhmm(arr)}–${hhmm(dep)}`;
+      items.push(
+        `<li class="${cls}" data-station="${c.station}"><span class="dot"></span><span class="name">${escapeHtml(stations[c.station].name)}</span><span class="num">${time}</span></li>`,
+      );
+    });
+    const target = j.calls[Math.max(0, next)];
+    const status = !state
+      ? "Hors service"
+      : state.dwelling
+        ? `À quai · ${escapeHtml(stations[target.station].name)}`
+        : `Vers ${escapeHtml(stations[target.station].name)} · ${countdown(msToT(target.arr), t)}`;
+    setInfo(`
+      <header>${badge(line)}<h2>${escapeHtml(j.destination)}</h2><span class="rt-tag">Temps réel</span></header>
+      <div class="status"><span>${status}</span>${state ? `<button id="follow" class="text-btn ${follow ? "on" : ""}" aria-pressed="${follow}">Suivre</button>` : ""}</div>
+      <div class="scroll"><ol class="stops" style="--c:${line.color}">${items.join("")}</ol></div>`);
   }
 
   infoBody.addEventListener("click", (e) => {
@@ -450,27 +635,42 @@ async function main() {
   const count = $("count");
   let lastShown = -1;
   let lastFrame = performance.now();
+  let lastPush = 0;
 
-  function trainFeature(s: TrainState) {
-    const [lon, lat] = pointAt(shapes[s.pattern.shape], s.dist);
-    const line = lines[s.pattern.line];
+  function feature(id: string, lineIndex: number, shape: number, dist: number, est: boolean) {
+    const [lon, lat] = pointAt(shapes[shape], dist);
+    const line = lines[lineIndex];
     return {
       type: "Feature" as const,
       properties: {
-        id: s.trip.id,
+        id,
         color: line.color,
         text: line.text,
         label: line.id,
-        sel: selection?.kind === "train" && selection.id === s.trip.id,
+        est,
+        sel: selection?.kind === "train" && selection.id === id,
       },
       geometry: { type: "Point" as const, coordinates: [lon, lat] },
     };
   }
+  const scheduledFeature = (s: TrainState, est: boolean) =>
+    feature(s.trip.id, s.pattern.line, s.pattern.shape, s.dist, est);
+  const rtFeature = (s: RtTrain) => feature(`rt:${s.id}`, s.line, s.shape, s.dist, false);
 
   function frame(now: number) {
     const dt = Math.min((now - lastFrame) / 1000, 1); // cap jumps after a background tab
     lastFrame = now;
-    if (playing && !scrubbing) {
+    if (live) {
+      t = anchor.t + (Date.now() - anchor.ms) / 1000;
+      dirty = true;
+      if (t >= DAY || Date.now() - anchor.ms > 60_000) {
+        const n = parisNow();
+        if (n.date !== date) setDate(nearestDate(n.date));
+        t = n.t;
+        anchor = { ms: Date.now(), t, date };
+        syncControls();
+      }
+    } else if (playing && !scrubbing) {
       t += dt * speed;
       dirty = true;
       if (t >= DAY) {
@@ -487,12 +687,27 @@ async function main() {
       }
     }
 
-    if (dirty && ready) {
+    // At low speed trains move under a pixel per frame: refresh positions less
+    // often to spare the CPU (matters for long live sessions on laptops/phones).
+    const minInterval = live || speed === 1 ? 100 : speed <= 10 ? 33 : 0;
+    if (dirty && ready && now - lastPush >= minInterval) {
+      lastPush = now;
       dirty = false;
-      const active = schedule.active(t).filter((s) => !hidden.has(s.pattern.line));
-      const features = active.map(trainFeature);
+      let features;
+      if (realtime()) {
+        const rt = locate(feed.journeys, track, Date.now()).filter((s) => !hidden.has(s.line));
+        const scheduled = schedule
+          .active(t)
+          .filter((s) => !hidden.has(s.pattern.line) && !rtLines.has(s.pattern.line));
+        features = [...scheduled.map((s) => scheduledFeature(s, true)), ...rt.map(rtFeature)];
+      } else {
+        features = schedule
+          .active(t)
+          .filter((s) => !hidden.has(s.pattern.line))
+          .map((s) => scheduledFeature(s, false));
+      }
       (map.getSource("trains") as GeoJSONSource).setData({ type: "FeatureCollection", features });
-      count.textContent = String(active.length);
+      count.textContent = String(features.length);
       if (follow && selection?.kind === "train") {
         const f = features.find((x) => x.properties.sel);
         if (f) map.setCenter(f.geometry.coordinates as [number, number]);
@@ -509,15 +724,21 @@ async function main() {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  syncLive();
+  if (params.has("live")) {
+    if (feed.configured) enterLive();
+    else openKeyDialog();
+  }
 
   // Inspection hook for tests, agents and the browser console.
   Object.assign(window, {
     metro: {
       map,
       schedule,
+      feed,
       select,
       get state() {
-        return { date, t, playing, speed, hidden: [...hidden], selection, ready };
+        return { date, t, playing, speed, hidden: [...hidden], selection, ready, live, realtime: realtime() };
       },
     },
   });

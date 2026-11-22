@@ -25,8 +25,9 @@
           <svg viewBox="0 0 24 24" class="i-play"><path d="M7 5v14l12-7z" /></svg>
         </button>
         <div id="speeds" class="segmented" role="radiogroup" aria-label="Vitesse"></div>
-        <button id="now" class="text-btn">Maintenant</button>
+        <button id="live" class="text-btn live-btn" data-state="off"><span class="live-dot"></span>Direct</button>
       </div>
+      <p id="rt-error" class="rt-error" hidden><span></span><button class="link-btn">Modifier la clé</button></p>
       <div id="lines" class="lines" aria-label="Lignes"></div>
     </section>
 
@@ -34,6 +35,21 @@
       <button id="close" class="close" aria-label="Fermer">×</button>
       <div id="info-body"></div>
     </aside>
+
+    <dialog id="key-dialog">
+      <form method="dialog">
+        <h2>Temps réel</h2>
+        <label for="key-input">Clé API PRIM</label>
+        <input id="key-input" type="password" autocomplete="off" spellcheck="false" />
+        <a href="https://prim.iledefrance-mobilites.fr/" target="_blank" rel="noopener">Obtenir une clé gratuite</a>
+        <div class="dialog-actions">
+          <!-- "Activer" comes first so that Enter submits it; CSS restores the visual order. -->
+          <button value="save" class="text-btn primary">Activer</button>
+          <button value="schedule" class="text-btn">Horaires théoriques</button>
+          <button value="forget" id="key-forget" class="link-btn">Supprimer la clé</button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
