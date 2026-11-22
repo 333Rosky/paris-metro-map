@@ -31,8 +31,17 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - Trains drawn to scale along the track from zoom 12.5 (75 m; 90 m lines 1/4; 120 m line 14; 45 m 3bis/7bis).
 - Line badges now focus a line instead of hiding it (the hide toggle is gone).
 
+## Relay (2026-11-22)
+- User request: every visitor gets real time without a key. The key stays the only secret of the project.
+- `relay/core.mjs` (no dependency): on demand, at most one PRIM request per 90 s (≤ 960/day, floor of 87 s enforced against the real PRIM), metro lines only, same SIRI Lite shape, ~45 KB gzipped. Serves the last snapshot up to 5 min when PRIM fails, then 503 with the cause. `x-refresh-in` tells clients when to poll again.
+- `relay/server.mjs`: plain Node server for any host. `relay/lambda.mjs` + `relay/aws/`: AWS Lambda function URL, snapshot and upstream claim in S3 (compare-and-swap), key in an SSM SecureString.
+- Site: `VITE_REALTIME_URL` (repository variable `REALTIME_URL` in CI) switches to relay mode: no key dialog, the stored key is never sent to the relay, trains fall back to the timetable when no snapshot younger than 4 min is available (also applies to direct PRIM mode).
+- Verified locally against the real PRIM feed (22:48): refresh in 1.6 s, 597 metro journeys, 43 KB; site through the relay shows 187 real-time trains on 15 lines, line 6 from the timetable, no key requested or sent.
+
 ## Status
-- 15 E2E tests pass (desktop + mobile), including a real PRIM capture fixture.
+- 24 E2E tests pass locally (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
+- Relay not hosted yet: only the AWS CLI is installed here and both profiles (`vega-honours`, `statarena`) have expired sessions. `relay/lambda.mjs` and `relay/aws/` are written but never run on AWS: uncommitted until a deploy proves them.
 
 ## Next
-- Shared proxy so visitors get real time without a key; RER/tram; PRIM disruptions on the line view.
+- User picks the host and logs in; then `relay/aws/deploy.sh`, `gh variable set REALTIME_URL`, redeploy the site, check production without a key.
+- Later: RER/tram; PRIM disruptions on the line view.

@@ -203,6 +203,7 @@ async function main() {
     const showError = live && st.kind === "error";
     rtError.hidden = !showError;
     if (showError) rtError.querySelector("span")!.textContent = st.message;
+    rtError.querySelector("button")!.hidden = feed.relay; // a relay has no key to edit
   }
 
   function enterLive() {
@@ -252,8 +253,8 @@ async function main() {
   });
 
   liveBtn.addEventListener("click", () => {
-    if (live || !feed.configured) openKeyDialog();
-    else enterLive();
+    if (!live && feed.configured) enterLive();
+    else if (!feed.relay) openKeyDialog();
   });
   rtError.querySelector("button")!.addEventListener("click", openKeyDialog);
 

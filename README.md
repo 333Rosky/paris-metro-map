@@ -6,7 +6,7 @@ Carte animée de toutes les rames du métro parisien (lignes 1 à 14, 3bis et 7b
 
 - **Toutes les rames** positionnées sur le tracé réel des lignes, avec accélération au départ et freinage à l'approche des stations. En zoomant, chaque rame est dessinée à l'échelle (75 m, 90 m sur les lignes 1 et 4, 120 m sur la 14) et épouse les courbes de la voie.
 - **Le temps** : lecture, pause, vitesses ×1 à ×300, curseur sur la journée, choix du jour.
-- **Le direct** : le bouton « Direct » cale la carte sur l'heure de Paris et, avec une clé API PRIM, place les rames d'après les prochains passages annoncés en temps réel.
+- **Le direct** : le bouton « Direct » cale la carte sur l'heure de Paris et place les rames d'après les prochains passages annoncés en temps réel, via un relais ou avec une clé API PRIM personnelle.
 - **Les lignes** : un clic sur une pastille ou sur un tracé isole la ligne et ouvre son schéma, avec ses stations, ses branches et toutes ses rames en mouvement dans les deux sens.
 - **Les stations** : un clic affiche les prochains passages avec heure d'arrivée, heure de départ et direction.
 - **Les rames** : un clic affiche la mission (arrêt en cours, arrêts à venir, horaires) ; « Suivre » garde la rame au centre.
@@ -29,20 +29,37 @@ Sur la plupart des lignes, une « mission » du flux n'est pas une rame : le mê
 
 Sur une capture du 22 novembre 2026 à 20 h 52, cette méthode donne 220 rames sur les 15 lignes couvertes, pour 197 prévues à l'horaire (ligne 14 : 24/24, ligne 9 : 19/19, ligne 10 : 6/6). Les lignes absentes du flux (la 6 ce jour-là) restent affichées d'après l'horaire, en transparence.
 
-Pour l'activer :
+PRIM exige une clé, limitée à 1 000 requêtes par jour, et sa réponse couvre toute l'Île-de-France (30 Mo de JSON, 2,6 Mo compressés). Deux façons de lire le flux :
+
+### Avec un relais : aucun visiteur n'a besoin de clé
+
+Le relais (`relay/`) garde la clé côté serveur et sert à tous les visiteurs la partie métro du flux :
+
+- il n'interroge PRIM que lorsqu'un visiteur le demande, et au plus une fois toutes les 90 secondes (960 requêtes par jour au maximum, quel que soit le nombre de visiteurs) ;
+- il ne conserve que les 16 lignes de métro et les champs lus par la carte : environ 45 Ko compressés au lieu de 2,6 Mo, dans le même format SIRI Lite ;
+- si PRIM ne répond plus, il sert le dernier instantané pendant 5 minutes au plus, puis répond 503 ; la carte revient alors aux horaires théoriques et l'indique ;
+- la clé n'apparaît dans aucune réponse, et une clé enregistrée dans le navigateur n'est jamais envoyée au relais.
+
+```bash
+npm run relay                                             # lit PRIM_API_KEY dans .env, écoute sur :8787
+VITE_REALTIME_URL=http://localhost:8787/ npm run dev      # le site lit le relais
+```
+
+Le relais est un serveur Node sans dépendance (`relay/server.mjs`) : il tourne sur tout hébergeur qui garde un processus en vie. Variables : `PRIM_API_KEY` (obligatoire), `PORT`, `REFRESH_SECONDS` (90, jamais moins de 87 face à PRIM), `MAX_STALE_SECONDS` (300). Le site publié lit l'adresse du relais dans `VITE_REALTIME_URL` au moment du build ; le workflow la prend dans la variable de dépôt `REALTIME_URL`.
+
+### Sans relais : une clé personnelle
 
 1. créer un compte gratuit sur PRIM et générer un jeton API ;
 2. cliquer sur « Direct » et coller la clé. Elle reste dans le navigateur (`localStorage`) et n'est envoyée qu'à PRIM, dans l'en-tête `apikey`.
 
-Un jeton est limité à 1 000 requêtes par jour ; le flux est interrogé une fois par minute (environ 16 h de direct). La réponse couvre toute l'Île-de-France (30 Mo de JSON, 2,6 Mo compressés) : elle est lue et filtrée dans un worker pour ne pas figer la carte.
-
-Pour servir le temps réel à tous les visiteurs sans clé, définir `VITE_REALTIME_URL` au build vers un proxy qui ajoute la clé côté serveur et renvoie la même réponse SIRI.
+Le flux est alors interrogé une fois par minute (environ 16 h de direct par jour avec le quota) ; la réponse complète est lue et filtrée dans un worker pour ne pas figer la carte.
 
 ### La clé ne doit jamais être publiée
 
 - En local, la clé se range dans `.env` (`PRIM_API_KEY=…`), ignoré par Git et jamais inclus dans le site construit.
 - `npm install` active un crochet `pre-commit` (`.githooks/`) qui refuse tout commit contenant la valeur de cette clé ou un fichier `.env`.
-- Ne jamais placer la clé dans une variable `VITE_…` : Vite l'écrirait dans le JavaScript publié.
+- Ne jamais placer la clé dans une variable `VITE_…` : Vite l'écrirait dans le JavaScript publié. `VITE_REALTIME_URL` ne contient que l'adresse du relais, qui est publique.
+- Sur l'hébergeur du relais, la clé se range dans son gestionnaire de secrets, jamais dans le dépôt.
 
 ## Lancer en local
 
@@ -73,6 +90,7 @@ IDFM GTFS (zip) ──► scripts/build_data.py ──► public/data/network.js
                                                         ▼
                          src/schedule.ts   rames actives à l'instant t, tableaux de passages
                          src/realtime.ts   rames reconstruites depuis le flux PRIM (siri.ts, rt-worker.ts)
+                         relay/            relais du flux PRIM : clé côté serveur, partie métro uniquement
                          src/lineview.ts   schéma d'une ligne et de ses rames
                          src/geo.ts        position le long du tracé
                          src/main.ts       carte MapLibre, animation, interface
@@ -93,13 +111,14 @@ Les tests de bout en bout chargent l'application dans Chromium à des instants f
 
 Le mode direct est testé sans appeler PRIM : contre un flux simulé à partir des horaires (2 minutes de retard), contre une clé refusée, et contre une capture réelle du flux (`tests/fixtures/`, partie métro uniquement, données IDFM sous licence ODbL).
 
+Le relais est testé de bout en bout (`tests/relay.spec.ts`) : un faux PRIM local (`tests/fake-prim.mjs`) sert la capture noyée parmi d'autres lignes, le relais tourne devant lui, et un second build du site lit ce relais. Les tests vérifient que la clé ne sort jamais, qu'une rafale de visiteurs ne coûte qu'une requête à PRIM, le comportement quand PRIM échoue puis revient, et le retour de la carte aux horaires quand le relais ne répond plus.
+
 ## Déploiement
 
 Le workflow GitHub Actions régénère les données chaque matin depuis le flux IDFM, exécute les tests puis publie le site sur GitHub Pages.
 
 ## Pistes
 
-- Proxy partagé (Cloudflare Worker ou équivalent) pour le temps réel sans clé côté visiteur.
 - RER, tramways et Transilien (même pipeline, autres `route_type`).
 - Perturbations et info trafic PRIM sur la vue par ligne.
 

@@ -50,8 +50,9 @@ const lastCode = (ref: string | undefined) => ref?.split(":").filter(Boolean).po
  * (verified on a capture of 2026-11-22). Only the individual calls are
  * trustworthy, so journeys are deliberately discarded here.
  */
-export function parseSiri(payload: Json, refs: SiriRefs): { calls: RtCall[]; journeys: number } {
-  const deliveries: Json[] = payload?.Siri?.ServiceDelivery?.EstimatedTimetableDelivery ?? [];
+export function parseSiri(payload: Json, refs: SiriRefs): { calls: RtCall[]; journeys: number; stamp: number | null } {
+  const service = payload?.Siri?.ServiceDelivery;
+  const deliveries: Json[] = service?.EstimatedTimetableDelivery ?? [];
   const calls: RtCall[] = [];
   let journeys = 0;
   for (const delivery of deliveries) {
@@ -96,5 +97,5 @@ export function parseSiri(payload: Json, refs: SiriRefs): { calls: RtCall[]; jou
       }
     }
   }
-  return { calls, journeys };
+  return { calls, journeys, stamp: time(service?.ResponseTimestamp) ?? null };
 }

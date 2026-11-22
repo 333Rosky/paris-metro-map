@@ -23,6 +23,8 @@ export type { RtCall } from "./siri";
 export const PRIM_URL = "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable";
 const REFRESH_MS = 60_000; // PRIM refreshes once a minute
 const BACKOFF_MS = 5 * 60_000;
+/** Without a snapshot younger than this, trains fall back to the timetable. */
+const STALE_MS = 4 * 60_000;
 const KEY_STORAGE = "prim-api-key";
 
 /** Predictions further ahead than this say little about where the train is now. */
@@ -266,7 +268,10 @@ export function saveKey(key: string): void {
   }
 }
 
-/** Polls the feed while started. `url` may point to a proxy that holds the key. */
+/**
+ * Polls the feed while started. `url` is PRIM itself, read with the visitor's
+ * own key, or a relay that holds a key and serves everyone (see relay/).
+ */
 export class RealtimeFeed {
   calls: RtCall[] = [];
   trains: RtTrain[] = [];
@@ -275,6 +280,7 @@ export class RealtimeFeed {
   status: RtStatus = { kind: "off" };
   private byId = new Map<string, RtTrain>();
   private timer: number | undefined;
+  private expiry: number | undefined;
   private running = false;
   private worker: Worker | undefined;
   private refs: SiriRefs;
@@ -294,8 +300,13 @@ export class RealtimeFeed {
     };
   }
 
+  /** True when a relay serves the feed: no key is asked, and none is sent. */
+  get relay(): boolean {
+    return this.url !== PRIM_URL;
+  }
+
   get configured(): boolean {
-    return this.url !== PRIM_URL || this.key !== "";
+    return this.relay || this.key !== "";
   }
 
   train(id: string): RtTrain | undefined {
@@ -318,16 +329,23 @@ export class RealtimeFeed {
 
   clear(): void {
     this.stop();
-    this.calls = [];
-    this.trains = [];
-    this.lines = new Set();
-    this.byId = new Map();
+    this.drop();
     this.status = { kind: "off" };
   }
 
   restart(): void {
     this.clear();
     this.start();
+  }
+
+  /** Forgets the trains: the map shows the timetable again. */
+  private drop(): void {
+    clearTimeout(this.expiry);
+    this.expiry = undefined;
+    this.calls = [];
+    this.trains = [];
+    this.lines = new Set();
+    this.byId = new Map();
   }
 
   private schedule(ms: number) {
@@ -343,13 +361,22 @@ export class RealtimeFeed {
       this.worker.onmessage = (e: MessageEvent<FetchResult>) => this.receive(e.data);
       this.worker.onerror = () => this.receive({ ok: false, status: 0 });
     }
-    const request: FetchRequest = { url: this.url, key: this.key, refs: this.refs };
+    // The visitor's key is for PRIM only: a relay has its own.
+    const request: FetchRequest = { url: this.url, key: this.relay ? "" : this.key, refs: this.refs };
     this.worker.postMessage(request);
+  }
+
+  private fail(message: string, auth: boolean, retryMs: number): void {
+    this.status = { kind: "error", message, auth };
+    if (auth) this.stop();
+    else this.schedule(retryMs);
+    this.onUpdate();
   }
 
   private receive(result: FetchResult): void {
     if (!this.running) return;
     if (!result.ok) {
+      if (this.relay) return this.fail("Temps réel indisponible", false, REFRESH_MS);
       const auth = result.status === 401 || result.status === 403;
       const message = auth
         ? "Clé API refusée par PRIM"
@@ -358,19 +385,29 @@ export class RealtimeFeed {
           : result.status === 0
             ? "PRIM injoignable"
             : `PRIM indisponible (${result.status})`;
-      this.status = { kind: "error", message, auth };
-      if (auth) this.stop();
-      else this.schedule(result.status === 429 ? BACKOFF_MS : REFRESH_MS);
-      this.onUpdate();
-      return;
+      return this.fail(message, auth, result.status === 429 ? BACKOFF_MS : REFRESH_MS);
     }
     const now = Date.now();
+    if (result.stamp !== null && now - result.stamp > STALE_MS) {
+      // An old snapshot only knows trains that have since moved on.
+      this.drop();
+      return this.fail(this.relay ? "Temps réel indisponible" : "Données PRIM trop anciennes", false, REFRESH_MS);
+    }
     this.calls = result.calls;
     this.trains = buildTrains(result.calls, this.track, this.timetable.patterns, now, this.trains);
     this.byId = new Map(this.trains.map((t) => [t.id, t]));
     this.lines = new Set(result.calls.map((c) => c.line));
     this.status = { kind: "ok", at: now, trains: this.trains.length, journeys: result.journeys };
+    clearTimeout(this.expiry);
+    this.expiry = window.setTimeout(() => {
+      this.drop();
+      this.onUpdate();
+    }, STALE_MS);
     this.onUpdate();
-    this.schedule(REFRESH_MS);
+    // A relay says when its next snapshot can exist; the few seconds on top
+    // spread visitors out so that one of them triggers it and the rest get it.
+    const wait =
+      this.relay && result.refreshIn !== null ? (result.refreshIn + 2 + Math.random() * 8) * 1000 : REFRESH_MS;
+    this.schedule(Math.min(Math.max(wait, 10_000), REFRESH_MS));
   }
 }

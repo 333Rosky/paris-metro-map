@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "relay": "node --env-file-if-exists=.env relay/server.mjs",
     "test": "playwright test",
     "prepare": "git config core.hooksPath .githooks || true"
   },

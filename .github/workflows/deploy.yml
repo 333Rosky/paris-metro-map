@@ -44,6 +44,9 @@ jobs:
             test-results/
           retention-days: 14
       - run: npm run build
+        env:
+          # Address of the real-time relay (public, not a secret). Empty: visitors use their own PRIM key.
+          VITE_REALTIME_URL: ${{ vars.REALTIME_URL }}
       - uses: actions/upload-pages-artifact@v5
         if: github.ref == 'refs/heads/main'
         with:
