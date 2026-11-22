@@ -7,8 +7,8 @@
 // (about 40 KB gzipped) and hands that same snapshot to everyone.
 //
 // This module has no dependency and no I/O of its own besides `fetch`: the
-// snapshot lives in a store (memory here, S3 in lambda.mjs) so that several
-// instances can share one snapshot and one upstream budget.
+// snapshot lives in a store (memory here, DynamoDB in lambda.mjs) so that
+// several instances can share one snapshot and one upstream budget.
 
 import { gunzipSync, gzipSync } from "node:zlib";
 
@@ -26,6 +26,9 @@ const PRIM_MIN_REFRESH_MS = 87_000;
 const UPSTREAM_TIMEOUT_MS = 25_000;
 /** How long a request waits for a refresh started by another one when there is nothing to serve. */
 const WAIT_MS = 10_000;
+const WAIT_STEP_MS = 700;
+/** An instance looks for a snapshot written by another one at most this often. */
+const SYNC_MS = 3_000;
 const TIMES = ["AimedArrivalTime", "ExpectedArrivalTime", "AimedDepartureTime", "ExpectedDepartureTime"];
 
 // SIRI Lite wraps most strings as {value}; some producers send arrays of them.
@@ -103,7 +106,8 @@ export class UpstreamError extends Error {
  *
  * A store holds the last snapshot `{ body: gzipped JSON, fetchedAt }` and one
  * claim record `{ at, error }`: who last went to PRIM, and how it ended.
- * `claim` must be atomic: of all callers within `gapMs`, one gets `true`.
+ * `claim` must be atomic: of all callers within `gapMs` of the last claim, one
+ * gets `{ ok: true }`; the others get the standing claim, `{ ok: false, at, error }`.
  */
 export class MemoryStore {
   #snapshot = null;
@@ -115,9 +119,9 @@ export class MemoryStore {
     this.#snapshot = snapshot;
   }
   async claim(now, gapMs) {
-    if (this.#claim && now - this.#claim.at < gapMs) return false;
+    if (this.#claim && now - this.#claim.at < gapMs) return { ok: false, ...this.#claim };
     this.#claim = { at: now, error: null };
-    return true;
+    return { ok: true };
   }
   async fail(error) {
     if (this.#claim) this.#claim.error = error;
@@ -146,7 +150,11 @@ export class Relay {
     this.maxStaleMs = Math.max(maxStaleMs, this.refreshMs);
     this.store = store;
     this.log = log;
+    /** This instance's copy of the snapshot. */
     this.local = null;
+    /** Standing claim seen by this instance: nobody may go to PRIM before `until`. */
+    this.held = null;
+    this.syncedAt = 0;
   }
 
   /** @returns {Promise<{ status: number, headers: Record<string, string>, body: Buffer }>} */
@@ -182,43 +190,68 @@ export class Relay {
     });
   }
 
-  /** The snapshot to serve now, refreshing it first when it is due and nobody else is on it. */
-  async current() {
-    const due = (s) => !s || Date.now() - s.fetchedAt >= this.refreshMs;
-    const usable = (s) => (s && Date.now() - s.fetchedAt <= this.maxStaleMs ? s : null);
-    const sync = async () => {
+  /** Takes over a newer snapshot written by another instance, if there is one. */
+  async sync(force = false) {
+    if (!force && Date.now() - this.syncedAt < SYNC_MS) return;
+    this.syncedAt = Date.now();
+    try {
       const shared = await this.store.read();
       if (shared && (!this.local || shared.fetchedAt > this.local.fetchedAt)) this.local = shared;
-    };
+    } catch (e) {
+      this.log(`store read failed: ${e?.name ?? e}`);
+    }
+  }
 
-    if (!due(this.local)) return { snapshot: this.local };
-    await sync(); // another instance may have refreshed already
-    if (!due(this.local)) return { snapshot: this.local };
+  /** The snapshot to serve now, refreshing it first when it is due and nobody else is on it. */
+  async current() {
+    const due = () => !this.local || Date.now() - this.local.fetchedAt >= this.refreshMs;
+    const usable = () => (this.local && Date.now() - this.local.fetchedAt <= this.maxStaleMs ? this.local : null);
+    if (!due()) return { snapshot: this.local };
 
-    if (await this.store.claim(Date.now(), this.refreshMs)) {
+    // One atomic claim says whether anyone went to PRIM within the window; its
+    // answer is remembered, so a busy instance asks the store once per window.
+    if (!this.held || Date.now() >= this.held.until) {
+      let claim;
       try {
-        this.local = await this.refresh();
-        return { snapshot: this.local };
+        claim = await this.store.claim(Date.now(), this.refreshMs);
       } catch (e) {
-        const error = e instanceof UpstreamError ? e.reason : "upstream_unavailable";
-        this.log(`refresh failed: ${error}`);
-        await this.store.fail(error);
-        return { snapshot: usable(this.local), error };
+        this.log(`store claim failed: ${e?.name ?? e}`);
+        claim = { ok: false, at: Date.now() - this.refreshMs + SYNC_MS, error: null }; // ask again shortly
+      }
+      if (claim.ok) {
+        this.held = { until: Date.now() + this.refreshMs, error: null };
+        try {
+          this.local = await this.refresh();
+          return { snapshot: this.local };
+        } catch (e) {
+          const error = e instanceof UpstreamError ? e.reason : "upstream_unavailable";
+          this.log(`refresh failed: ${error}`);
+          this.held.error = error;
+          await this.store.fail(error).catch(() => {});
+          return { snapshot: usable(), error };
+        }
+      }
+      this.held = { until: claim.at + this.refreshMs, error: claim.error };
+    }
+
+    // Someone else holds the window: their snapshot may be newer than ours.
+    await this.sync();
+    if (usable()) return { snapshot: this.local };
+    if (this.held.error) return { snapshot: null, error: this.held.error };
+    // Nothing to serve and a refresh under way elsewhere: wait for it rather
+    // than answer empty-handed.
+    const deadline = Date.now() + WAIT_MS;
+    while (Date.now() < deadline) {
+      await sleep(WAIT_STEP_MS);
+      await this.sync(true);
+      if (usable()) return { snapshot: this.local };
+      const status = await this.store.status().catch(() => null);
+      if (status?.error) {
+        this.held = { until: status.at + this.refreshMs, error: status.error };
+        return { snapshot: null, error: status.error };
       }
     }
-
-    if (usable(this.local)) return { snapshot: this.local };
-    // Nothing to serve. Either the last attempt failed (say so), or a refresh
-    // is under way elsewhere (wait for it rather than answer empty-handed).
-    const deadline = Date.now() + WAIT_MS;
-    for (;;) {
-      const status = await this.store.status();
-      if (status?.error) return { snapshot: null, error: status.error };
-      if (Date.now() >= deadline) return { snapshot: null, error: "upstream_unavailable" };
-      await sleep(250);
-      await sync();
-      if (usable(this.local) && !due(this.local)) return { snapshot: this.local };
-    }
+    return { snapshot: null, error: "upstream_unavailable" };
   }
 
   async refresh() {
@@ -245,7 +278,8 @@ export class Relay {
     }
     const { payload, journeys } = slim(parsed);
     const snapshot = { body: gzipSync(JSON.stringify(payload)), fetchedAt: Date.now() };
-    await this.store.write(snapshot);
+    // If the store refuses the write, this instance still serves what it fetched.
+    await this.store.write(snapshot).catch((e) => this.log(`store write failed: ${e?.name ?? e}`));
     const quota = res.headers.get("x-ratelimit-remaining-day");
     this.log(
       `refreshed in ${Date.now() - started} ms: ${journeys} metro journeys, ${Math.round(snapshot.body.length / 1024)} KB gzipped` +
