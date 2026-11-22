@@ -41,8 +41,10 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 
 ## Status
 - 24 E2E tests pass locally (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
-- Relay not hosted yet. Both existing AWS profiles (`vega-honours`, `statarena`) are the same account with an expired session; sign-in started for a separate `paris-metro` profile, waiting for the user to approve it in the browser. `relay/lambda.mjs` and `relay/aws/` are written but never run on AWS: uncommitted until a deploy proves them.
+- Relay not hosted yet. Both existing AWS profiles (`vega-honours`, `statarena`) are the same account with an expired session. `relay/lambda.mjs` and `relay/aws/` are written but never run on AWS: uncommitted until a deploy proves them.
+- AWS sign-in from this machine (2026-11-22, not solved): the user's browser answered AWS's 400 page on every attempt. Verified: `aws login` (redirect to 127.0.0.1) cannot work here, Windows does not reach WSL ports on 127.0.0.1 (it does on the WSL address); a link cut at the first `&` reproduces that 400 page; the same links reach the sign-in page from WSL without cookies. Last attempt, outcome unknown: `aws login --profile paris-metro --region us-east-2 --remote` (the earlier working session was issued by us-east-2) opened in a private Chrome window. The user then answered "Non c bon" without a code: no session exists, sign-in stopped.
 
 ## Next
-- After sign-in: check the account's free-tier usage (`aws freetier get-free-tier-usage`) and existing DynamoDB tables in eu-west-3 before creating anything; then `AWS_PROFILE=paris-metro relay/aws/deploy.sh`, `gh variable set REALTIME_URL`, redeploy the site, check production without a key, commit the AWS files.
+- Ask the user whether to continue with AWS or stop there. Nothing exists on AWS.
+- If AWS: get a session (`--remote`, code pasted back), check the account's free-tier usage (`aws freetier get-free-tier-usage`) and existing DynamoDB tables in eu-west-3 before creating anything; then `AWS_PROFILE=paris-metro relay/aws/deploy.sh`, `gh variable set REALTIME_URL`, redeploy the site, check production without a key, commit the AWS files.
 - Later: RER/tram; PRIM disruptions on the line view.
