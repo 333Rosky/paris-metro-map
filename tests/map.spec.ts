@@ -104,15 +104,82 @@ test("playing advances the clock and moves trains", async ({ page }) => {
   expect(await positions()).not.toEqual(before);
 });
 
-test("line toggles hide and restore trains", async ({ page }) => {
+test("a line badge opens the line view with its trains", async ({ page }, info) => {
   const date = await pickWeekday(page);
-  await open(page, `date=${date}&time=18:00&paused`);
+  await open(page, `date=${date}&time=18:00:40&paused`);
   const all = await count(page);
-  await page.locator('.line-btn[data-line="0"]').click();
-  await expect(page.locator('.line-btn[data-line="0"]')).toHaveAttribute("aria-pressed", "false");
-  await expect.poll(() => count(page)).toBeLessThan(all);
-  await page.locator('.line-btn[data-line="0"]').click();
+
+  const badge = page.locator('.line-btn[data-line="4"]'); // line 4
+  await badge.click();
+  await expect(badge).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#line-view h2")).toHaveText("Métro 4");
+  const onLine = await count(page);
+  expect(onLine).toBeGreaterThan(10);
+  expect(onLine).toBeLessThan(all);
+  // Every train of the line is drawn on the schematic, split by direction.
+  await expect(page.locator("#line-view .lv-stops text")).toHaveCount(29);
+  await expect(page.locator("#line-view .lv-train")).toHaveCount(onLine);
+  const down = Number(await page.locator("#lv-down").textContent());
+  const up = Number(await page.locator("#lv-up").textContent());
+  expect(down + up).toBe(onLine);
+  expect(Math.min(down, up)).toBeGreaterThan(3);
+  await page.waitForTimeout(1200); // fitBounds animation, for the evidence screenshot
+  await page.screenshot({ path: info.outputPath("line-view.png") });
+
+  // A train on the schematic opens its run; back returns to the line.
+  await page.locator("#line-view .lv-train").first().click();
+  await expect(page.locator("#info .stops li")).not.toHaveCount(0);
+  await page.locator("#back").click();
+  await expect(page.locator("#line-view h2")).toBeVisible();
+
+  await badge.click();
+  await expect(page.locator("#info")).toBeHidden();
   await expect.poll(() => count(page)).toBe(all);
+});
+
+test("a branched line is laid out with its branches side by side @mobile", async ({ page }, info) => {
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:31:20&paused&line=13`);
+  await expect(page.locator("#line-view h2")).toHaveText("Métro 13");
+  const lanes = await page.evaluate(
+    () => new Set([...document.querySelectorAll("#line-view .lv-stops circle")].map((c) => c.getAttribute("cx"))).size,
+  );
+  expect(lanes).toBe(2);
+  await expect(page.locator("#line-view .lv-stops text")).toHaveCount(32);
+  await page.locator("#info").screenshot({ path: info.outputPath("line-13.png") });
+});
+
+test("zoomed in, trains are drawn to scale along the track", async ({ page }, info) => {
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:30&paused#15.2/48.8584/2.3470`);
+  await page.waitForTimeout(500);
+  const bodies = await page.evaluate(() => {
+    const m = (window as any).metro.map;
+    const feats = m.getSource("train-bodies").serialize().data.features;
+    const points = m.getSource("trains").serialize().data.features;
+    const R = 6371000;
+    const length = (c: number[][]) =>
+      c.slice(1).reduce((sum, p, i) => {
+        const dx = ((p[0] - c[i][0]) * Math.PI) / 180 * Math.cos((48.86 * Math.PI) / 180) * R;
+        const dy = ((p[1] - c[i][1]) * Math.PI) / 180 * R;
+        return sum + Math.hypot(dx, dy);
+      }, 0);
+    const byLine: Record<string, number[]> = {};
+    for (const f of feats) (byLine[f.properties.label] ??= []).push(length(f.geometry.coordinates));
+    const median = (a: number[]) => a.sort((x, y) => x - y)[a.length >> 1];
+    return { n: feats.length, points: points.length, l1: median(byLine["1"]), l14: median(byLine["14"]), l7: median(byLine["7"]) };
+  });
+  expect(bodies.n).toBe(bodies.points);
+  expect(bodies.n).toBeGreaterThan(400);
+  // 6-car, 8-car and 5-car trains.
+  expect(bodies.l1).toBeGreaterThan(85);
+  expect(bodies.l1).toBeLessThan(95);
+  expect(bodies.l14).toBeGreaterThan(114);
+  expect(bodies.l14).toBeLessThan(126);
+  expect(bodies.l7).toBeGreaterThan(71);
+  expect(bodies.l7).toBeLessThan(79);
+  await page.waitForTimeout(2500);
+  await page.screenshot({ path: info.outputPath("train-bodies.png") });
 });
 
 test("late evening runs continue past midnight on the next day @mobile", async ({ page }, info) => {

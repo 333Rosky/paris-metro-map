@@ -44,3 +44,24 @@ function bearing(a: [number, number], b: [number, number]): number {
   const dy = (b[1] - a[1]) * M_PER_DEG_LAT;
   return (Math.atan2(dx, dy) * 180) / Math.PI;
 }
+
+/** Coordinates of the shape between distances d0 and d1 (metres), clamped to its ends. */
+export function sliceAlong(shape: MeasuredShape, d0: number, d1: number): [number, number][] {
+  const { coords, cum } = shape;
+  const total = cum[cum.length - 1];
+  const a = Math.max(0, Math.min(total, d0));
+  const b = Math.max(a, Math.min(total, d1));
+  const start = pointAt(shape, a);
+  const end = pointAt(shape, b);
+  const out: [number, number][] = [[start[0], start[1]]];
+  let lo = 0;
+  let hi = cum.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= a) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let i = lo; i < cum.length && cum[i] < b; i++) out.push(coords[i]);
+  out.push([end[0], end[1]]);
+  return out;
+}

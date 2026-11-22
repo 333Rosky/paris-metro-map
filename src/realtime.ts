@@ -1,253 +1,252 @@
 // Real-time layer: IDFM PRIM "estimated-timetable" (SIRI Lite JSON).
 //
-// The metro has no public GPS feed. PRIM publishes, for each running train,
-// the expected arrival/departure time at its upcoming stops; positions are
-// interpolated between the previous and next stop along the GTFS track shape.
+// The metro has no public GPS feed. PRIM publishes, for every stop, when the
+// next few trains towards each destination are expected. Trains are rebuilt
+// from those per-stop predictions:
+//
+//   1. each prediction "train towards D reaches stop S in L seconds" is
+//      back-projected along the scheduled run to D: the train is where a
+//      scheduled train would be L seconds before reaching S;
+//   2. predictions that land within a tolerance of each other are the same
+//      train seen from several stops; the one from the nearest stop wins.
+//
+// Between two refreshes (PRIM updates once a minute) trains keep moving along
+// the scheduled profile from their last anchor.
 
-import type { Network, Timetable } from "./types";
+import { patternState, type PatternState } from "./schedule";
+import type { RtCall, SiriRefs } from "./siri";
+import type { FetchRequest, FetchResult } from "./rt-worker";
+import type { Network, Pattern, Timetable } from "./types";
+
+export type { RtCall } from "./siri";
 
 export const PRIM_URL = "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable";
 const REFRESH_MS = 60_000; // PRIM refreshes once a minute
 const BACKOFF_MS = 5 * 60_000;
 const KEY_STORAGE = "prim-api-key";
 
-export interface RtCall {
-  station: number;
-  /** Epoch milliseconds. */
-  arr: number;
-  dep: number;
-}
-
-export interface RtJourney {
-  id: string;
-  line: number;
-  destination: string;
-  calls: RtCall[];
-}
+/** Predictions further ahead than this say little about where the train is now. */
+const MAX_LEAD_MS = 15 * 60_000;
+/** Predictions already this far in the past are leftovers. */
+const PAST_MS = 45_000;
+/** Same-train tolerance: base seconds + share of the prediction's lead. */
+const TOL_BASE_S = 60;
+const TOL_PER_LEAD = 0.25;
+/** A train seen from a single far stop is not trusted. */
+const LONE_LEAD_MS = 120_000;
+/** Keep extrapolating this long past the anchor when no refresh arrives. */
+const COAST_MS = 150_000;
+const BLEND_MS = 8_000;
 
 export interface RtTrain {
   id: string;
-  journey: RtJourney;
   line: number;
-  shape: number;
-  dist: number;
-  /** Station the train is at or has just left, when known. */
-  from: number | null;
-  /** Index in journey.calls of the next (or current) call. */
-  next: number;
-  dwelling: boolean;
+  dest: number;
+  destName: string;
+  /** Scheduled run the train is assumed to follow, and its anchor stop on it. */
+  pattern: number;
+  k: number;
+  station: number;
+  /** Expected arrival at the anchor stop and end of its dwell there, epoch ms. */
+  at: number;
+  dwellEnd: number;
+  /** Predictions attributed to this train. */
+  calls: RtCall[];
+  /** Offset (pattern seconds) easing the jump from the previous anchor. */
+  blend?: { delta: number; t0: number };
+}
+
+export interface RtState extends PatternState {
+  tau: number;
 }
 
 export type RtStatus =
   | { kind: "off" }
   | { kind: "loading" }
-  | { kind: "ok"; at: number; journeys: number }
+  | { kind: "ok"; at: number; trains: number; journeys: number }
   | { kind: "error"; message: string; auth: boolean };
 
-// SIRI Lite wraps most strings as {value}; some producers send arrays of them.
-type Json = any;
-function text(x: Json): string | undefined {
-  if (x == null) return undefined;
-  if (Array.isArray(x)) return text(x[0]);
-  if (typeof x === "string") return x;
-  if (typeof x === "object" && "value" in x) return text(x.value);
-  return undefined;
-}
-function time(...candidates: Json[]): number | undefined {
-  for (const c of candidates) {
-    const s = text(c);
-    if (!s) continue;
-    const ms = Date.parse(s);
-    if (Number.isFinite(ms)) return ms;
-  }
-  return undefined;
-}
-const lastCode = (ref: string | undefined) => ref?.split(":").filter(Boolean).pop();
-
-export function parseSiri(payload: Json, network: Network): RtJourney[] {
-  const lineByRef = new Map(network.lines.map((l, i) => [l.ref, i]));
-  const deliveries: Json[] = payload?.Siri?.ServiceDelivery?.EstimatedTimetableDelivery ?? [];
-  const out: RtJourney[] = [];
-  let n = 0;
-  for (const delivery of deliveries) {
-    for (const frame of delivery?.EstimatedJourneyVersionFrame ?? []) {
-      for (const vj of frame?.EstimatedVehicleJourney ?? []) {
-        n++;
-        const lineRef = text(vj.LineRef)?.match(/C\d{5}/)?.[0];
-        const line = lineRef ? lineByRef.get(lineRef) : undefined;
-        if (line === undefined) continue;
-
-        const raw: Json[] = [
-          ...(vj.RecordedCalls?.RecordedCall ?? []),
-          ...(vj.EstimatedCalls?.EstimatedCall ?? []),
-        ];
-        const calls: RtCall[] = [];
-        for (const c of raw) {
-          const station = network.stopRefs[lastCode(text(c.StopPointRef)) ?? ""];
-          if (station === undefined) continue;
-          const arr = time(c.ActualArrivalTime, c.ExpectedArrivalTime, c.AimedArrivalTime);
-          const dep = time(c.ActualDepartureTime, c.ExpectedDepartureTime, c.AimedDepartureTime);
-          if (arr === undefined && dep === undefined) continue;
-          const call = { station, arr: arr ?? dep!, dep: Math.max(dep ?? arr!, arr ?? dep!) };
-          const prev = calls[calls.length - 1];
-          if (prev && prev.station === call.station) {
-            prev.dep = Math.max(prev.dep, call.dep);
-            continue;
-          }
-          calls.push(call);
-        }
-        if (!calls.length) continue;
-        calls.sort((a, b) => a.arr - b.arr);
-
-        const lastRaw = raw[raw.length - 1];
-        const destination =
-          text(vj.DestinationName) ??
-          text(lastRaw?.DestinationDisplay) ??
-          network.stations[calls[calls.length - 1].station].name;
-        const id =
-          text(vj.DatedVehicleJourneyRef) ??
-          text(vj.FramedVehicleJourneyRef?.DatedVehicleJourneyRef) ??
-          `${lineRef}-${n}`;
-        out.push({ id, line, destination, calls });
-      }
-    }
-  }
-  return out;
-}
-
-function ease(f: number): number {
-  return f - Math.sin(2 * Math.PI * f) / (2 * Math.PI);
-}
-
-interface Span {
-  shape: number;
-  d0: number;
-  d1: number;
-  /** Scheduled seconds from leaving `a` to reaching `b`. */
-  run: number;
-}
-
-/** Track geometry lookups between stations, derived from the timetable patterns. */
+/** Lookups over the scheduled patterns of each line. */
 export class Track {
-  private spans = new Map<string, Span | null>();
-  private byLine = new Map<number, { shape: number; stops: number[]; dist: number[]; arr: number[]; dep: number[] }[]>();
+  private byLine = new Map<number, number[]>();
+  private weight: number[];
+  private picks = new Map<string, { pattern: number; k: number } | null>();
+  private neighbours = new Map<string, Set<number>>();
 
-  constructor(timetable: Timetable) {
-    const seen = new Set<string>();
-    for (const p of timetable.patterns) {
-      const key = `${p.line}|${p.shape}|${p.stops.join(",")}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+  constructor(private timetable: Timetable) {
+    const { patterns, services } = timetable;
+    this.weight = new Array(patterns.length).fill(0);
+    for (const flat of services) for (let i = 0; i < flat.length; i += 2) this.weight[flat[i]]++;
+    patterns.forEach((p, pi) => {
       let list = this.byLine.get(p.line);
       if (!list) this.byLine.set(p.line, (list = []));
-      list.push(p);
-    }
-  }
-
-  /** Geometry from station a to b (b after a on some run of the line). */
-  span(line: number, a: number, b: number): Span | null {
-    const key = `${line}|${a}|${b}`;
-    const cached = this.spans.get(key);
-    if (cached !== undefined) return cached;
-    let best: Span | null = null;
-    let bestGap = Infinity;
-    for (const p of this.byLine.get(line) ?? []) {
-      const i = p.stops.indexOf(a);
-      if (i < 0) continue;
-      const j = p.stops.indexOf(b, i + 1);
-      if (j < 0 || j - i >= bestGap) continue;
-      bestGap = j - i;
-      best = { shape: p.shape, d0: p.dist[i], d1: p.dist[j], run: p.arr[j] - p.dep[i] };
-    }
-    this.spans.set(key, best);
-    return best;
-  }
-
-  /** Station served just before `b` on a run heading on to `c` (if given). */
-  before(line: number, b: number, c?: number): number | null {
-    let fallback: number | null = null;
-    for (const p of this.byLine.get(line) ?? []) {
-      const k = p.stops.indexOf(b);
-      if (k <= 0) continue;
-      if (c === undefined || p.stops[k + 1] === c) return p.stops[k - 1];
-      if (c !== undefined && p.stops.indexOf(c, k + 1) > 0) fallback ??= p.stops[k - 1];
-    }
-    return fallback;
-  }
-}
-
-/** Where every train of the feed is at `now` (epoch ms). */
-export function locate(journeys: RtJourney[], track: Track, now: number): RtTrain[] {
-  const out: RtTrain[] = [];
-  for (const j of journeys) {
-    const t = trainAt(j, track, now);
-    if (t) out.push(t);
-  }
-  return out;
-}
-
-export function trainAt(j: RtJourney, track: Track, now: number): RtTrain | null {
-  const { calls, line } = j;
-  const i = calls.findIndex((c) => c.dep >= now);
-  if (i < 0) return null; // run finished
-  const c = calls[i];
-  const base = { id: j.id, journey: j, line, next: i };
-
-  if (c.arr <= now) {
-    // At the platform.
-    const neighbour = i > 0 ? track.span(line, calls[i - 1].station, c.station) : null;
-    const after = !neighbour && i + 1 < calls.length ? track.span(line, c.station, calls[i + 1].station) : null;
-    const s = neighbour ?? after;
-    if (!s) return null;
-    return { ...base, shape: s.shape, dist: neighbour ? s.d1 : s.d0, from: c.station, dwelling: true };
-  }
-
-  // Heading to call i: find where it comes from and when it left.
-  let from: number | null;
-  let left: number;
-  if (i > 0) {
-    from = calls[i - 1].station;
-    left = calls[i - 1].dep;
-  } else {
-    from = track.before(line, c.station, calls[1]?.station);
-    if (from === null) {
-      // First stop of the run: only show it shortly before departure.
-      if (c.arr - now > 120_000 || calls.length < 2) return null;
-      const s = track.span(line, c.station, calls[1].station);
-      return s ? { ...base, shape: s.shape, dist: s.d0, from: c.station, dwelling: true } : null;
-    }
-    const s = track.span(line, from, c.station);
-    left = c.arr - (s ? s.run * 1000 : 90_000);
-  }
-  const s = track.span(line, from, c.station);
-  if (!s) return null;
-  if (now < left) {
-    // Not yet left the previous station (or still upstream of it).
-    if (left - now > 180_000) return null;
-    return { ...base, shape: s.shape, dist: s.d0, from, dwelling: true };
-  }
-  const f = c.arr > left ? ease(Math.min(1, (now - left) / (c.arr - left))) : 1;
-  return { ...base, shape: s.shape, dist: s.d0 + (s.d1 - s.d0) * f, from, dwelling: false };
-}
-
-export interface RtBoardRow {
-  journey: RtJourney;
-  arr: number;
-  dep: number;
-  terminus: boolean;
-}
-
-export function rtBoard(journeys: RtJourney[], station: number, now: number, limit = 14): RtBoardRow[] {
-  const rows: RtBoardRow[] = [];
-  for (const j of journeys) {
-    j.calls.forEach((c, k) => {
-      if (c.station === station && c.dep >= now) {
-        rows.push({ journey: j, arr: c.arr, dep: c.dep, terminus: k === j.calls.length - 1 });
+      list.push(pi);
+      for (const s of p.stops) {
+        const key = `${p.line}|${s}`;
+        let set = this.neighbours.get(key);
+        if (!set) this.neighbours.set(key, (set = new Set()));
+        for (const o of p.stops) set.add(o);
       }
     });
   }
-  rows.sort((a, b) => a.arr - b.arr);
-  return rows.slice(0, limit);
+
+  /** Most common run of the line that serves `station` and then reaches `dest`. */
+  pick(line: number, station: number, dest: number): { pattern: number; k: number } | null {
+    const key = `${line}|${station}|${dest}`;
+    const cached = this.picks.get(key);
+    if (cached !== undefined) return cached;
+    let best: { pattern: number; k: number } | null = null;
+    let bestEnds = false;
+    let bestWeight = -1;
+    for (const pi of this.byLine.get(line) ?? []) {
+      const p = this.timetable.patterns[pi];
+      const k = p.stops.indexOf(station);
+      if (k < 0 || p.stops.indexOf(dest, k) < 0) continue;
+      const ends = p.stops[p.stops.length - 1] === dest;
+      const w = this.weight[pi];
+      if (!best || (ends && !bestEnds) || (ends === bestEnds && w > bestWeight)) {
+        best = { pattern: pi, k };
+        bestEnds = ends;
+        bestWeight = w;
+      }
+    }
+    this.picks.set(key, best);
+    return best;
+  }
+
+  /** True when some run of the line serves both stations (same branch). */
+  share(line: number, a: number, b: number): boolean {
+    return this.neighbours.get(`${line}|${a}`)?.has(b) ?? false;
+  }
+}
+
+function baseTau(train: RtTrain, p: Pattern, now: number): number | null {
+  const { k } = train;
+  if (now < train.at) return p.arr[k] - (train.at - now) / 1000;
+  if (now <= train.dwellEnd) return p.arr[k] + Math.min((now - train.at) / 1000, p.dep[k] - p.arr[k]);
+  if (now - train.dwellEnd > COAST_MS) return null;
+  return p.dep[k] + (now - train.dwellEnd) / 1000;
+}
+
+/** Where a reconstructed train is at `now` (epoch ms); null once out of sight. */
+export function rtState(train: RtTrain, patterns: Pattern[], now: number): RtState | null {
+  const p = patterns[train.pattern];
+  let tau = baseTau(train, p, now);
+  if (tau === null) return null;
+  if (train.blend) {
+    const w = 1 - (now - train.blend.t0) / BLEND_MS;
+    if (w > 0) tau += train.blend.delta * w;
+  }
+  if (tau < 0) {
+    // Waiting at its first stop: shown shortly before departure only.
+    if (train.k !== 0 || train.at - now > 90_000) return null;
+    tau = 0;
+  }
+  const state = patternState(p, tau);
+  return state ? { ...state, tau } : null;
+}
+
+let nextId = 1;
+
+/** Rebuilds trains from per-stop predictions; `previous` keeps ids stable across refreshes. */
+export function buildTrains(
+  calls: RtCall[],
+  track: Track,
+  patterns: Pattern[],
+  now: number,
+  previous: RtTrain[] = [],
+): RtTrain[] {
+  interface Candidate {
+    call: RtCall;
+    pattern: number;
+    k: number;
+    lead: number;
+    /** Seconds left to reach the destination. */
+    u: number;
+  }
+  const groups = new Map<string, Candidate[]>();
+  for (const call of calls) {
+    call.train = undefined;
+    const lead = call.arr - now;
+    if (lead < -PAST_MS || lead > MAX_LEAD_MS) continue;
+    const pick = track.pick(call.line, call.station, call.dest);
+    if (!pick) continue;
+    const p = patterns[pick.pattern];
+    const ahead = Math.max(lead, 0) / 1000;
+    const tau = p.arr[pick.k] - ahead;
+    if (tau < 0 && !(pick.k === 0 && lead < 90_000)) continue; // not departed yet
+    const key = `${call.line}|${call.dest}`;
+    let list = groups.get(key);
+    if (!list) groups.set(key, (list = []));
+    list.push({ call, ...pick, lead, u: p.arr[p.arr.length - 1] - p.arr[pick.k] + ahead });
+  }
+
+  const built: (RtTrain & { u: number; lead: number })[] = [];
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.lead - b.lead);
+    const trains: (RtTrain & { u: number; lead: number })[] = [];
+    for (const c of list) {
+      const tol = TOL_BASE_S + (TOL_PER_LEAD * Math.max(c.lead, 0)) / 1000;
+      let hit: (typeof trains)[number] | undefined;
+      for (const t of trains) {
+        const d = Math.abs(t.u - c.u);
+        if (d > tol || (hit && d >= Math.abs(hit.u - c.u))) continue;
+        if (track.share(c.call.line, t.station, c.call.station)) hit = t;
+      }
+      if (hit) {
+        hit.calls.push(c.call);
+        continue;
+      }
+      const p = patterns[c.pattern];
+      trains.push({
+        id: "",
+        line: c.call.line,
+        dest: c.call.dest,
+        destName: c.call.destName,
+        pattern: c.pattern,
+        k: c.k,
+        station: c.call.station,
+        at: c.call.arr,
+        dwellEnd: Math.max(c.call.dep, c.call.arr + (p.dep[c.k] - p.arr[c.k]) * 1000),
+        calls: [c.call],
+        u: c.u,
+        lead: c.lead,
+      });
+    }
+    for (const t of trains) if (t.calls.length >= 2 || t.lead <= LONE_LEAD_MS) built.push(t);
+  }
+
+  // Keep identities: a new train inherits the id of the previous train that
+  // would be at about the same place now.
+  const old = previous
+    .map((t) => {
+      const s = rtState(t, patterns, now);
+      const p = patterns[t.pattern];
+      return s ? { t, tau: s.tau, u: p.arr[p.arr.length - 1] - s.tau, used: false } : null;
+    })
+    .filter((x) => x !== null);
+  built.sort((a, b) => a.lead - b.lead);
+  for (const t of built) {
+    let best: (typeof old)[number] | null = null;
+    for (const o of old) {
+      if (o.used || o.t.line !== t.line || o.t.dest !== t.dest) continue;
+      const d = Math.abs(o.u - t.u);
+      if (d <= 90 && (!best || d < Math.abs(best.u - t.u))) best = o;
+    }
+    if (best) {
+      best.used = true;
+      t.id = best.t.id;
+      if (best.t.pattern === t.pattern) {
+        const p = patterns[t.pattern];
+        const fresh = baseTau(t, p, now);
+        if (fresh !== null) t.blend = { delta: best.tau - fresh, t0: now };
+      }
+    } else {
+      t.id = `t${nextId++}`;
+    }
+    for (const c of t.calls) c.train = t.id;
+  }
+  return built;
 }
 
 export function loadKey(): string {
@@ -269,20 +268,38 @@ export function saveKey(key: string): void {
 
 /** Polls the feed while started. `url` may point to a proxy that holds the key. */
 export class RealtimeFeed {
-  journeys: RtJourney[] = [];
+  calls: RtCall[] = [];
+  trains: RtTrain[] = [];
+  /** Lines the feed currently covers. */
+  lines = new Set<number>();
   status: RtStatus = { kind: "off" };
+  private byId = new Map<string, RtTrain>();
   private timer: number | undefined;
   private running = false;
+  private worker: Worker | undefined;
+  private refs: SiriRefs;
+  private track: Track;
 
   constructor(
-    private network: Network,
+    network: Network,
+    private timetable: Timetable,
     private url: string,
     public key: string,
     private onUpdate: () => void,
-  ) {}
+  ) {
+    this.track = new Track(timetable);
+    this.refs = {
+      lineRefs: Object.fromEntries(network.lines.map((l, i) => [l.ref, i])),
+      stopRefs: network.stopRefs,
+    };
+  }
 
   get configured(): boolean {
     return this.url !== PRIM_URL || this.key !== "";
+  }
+
+  train(id: string): RtTrain | undefined {
+    return this.byId.get(id);
   }
 
   start(): void {
@@ -290,7 +307,7 @@ export class RealtimeFeed {
     this.running = true;
     if (this.status.kind !== "ok") this.status = { kind: "loading" };
     this.onUpdate();
-    void this.poll();
+    this.poll();
   }
 
   stop(): void {
@@ -299,48 +316,61 @@ export class RealtimeFeed {
     this.timer = undefined;
   }
 
-  restart(): void {
+  clear(): void {
     this.stop();
-    this.journeys = [];
+    this.calls = [];
+    this.trains = [];
+    this.lines = new Set();
+    this.byId = new Map();
     this.status = { kind: "off" };
+  }
+
+  restart(): void {
+    this.clear();
     this.start();
   }
 
   private schedule(ms: number) {
     clearTimeout(this.timer);
-    if (this.running) this.timer = window.setTimeout(() => void this.poll(), ms);
+    if (this.running) this.timer = window.setTimeout(() => this.poll(), ms);
   }
 
-  private async poll(): Promise<void> {
+  private poll(): void {
     if (!this.running) return;
     if (document.hidden) return this.schedule(5_000);
-    try {
-      const headers: Record<string, string> = { accept: "application/json" };
-      if (this.key) headers.apikey = this.key;
-      const res = await fetch(this.url, { headers, signal: AbortSignal.timeout(30_000) });
-      if (!res.ok) {
-        const auth = res.status === 401 || res.status === 403;
-        const message = auth
-          ? "Clé API refusée par PRIM"
-          : res.status === 429
-            ? "Quota PRIM atteint, nouvel essai dans 5 min"
-            : `PRIM indisponible (${res.status})`;
-        this.status = { kind: "error", message, auth };
-        this.onUpdate();
-        if (!auth) this.schedule(res.status === 429 ? BACKOFF_MS : REFRESH_MS);
-        else this.stop();
-        return;
-      }
-      const journeys = parseSiri(await res.json(), this.network);
-      if (!this.running) return;
-      this.journeys = journeys;
-      this.status = { kind: "ok", at: Date.now(), journeys: journeys.length };
-      this.onUpdate();
-      this.schedule(REFRESH_MS);
-    } catch {
-      this.status = { kind: "error", message: "PRIM injoignable", auth: false };
-      this.onUpdate();
-      this.schedule(REFRESH_MS);
+    if (!this.worker) {
+      this.worker = new Worker(new URL("./rt-worker.ts", import.meta.url), { type: "module" });
+      this.worker.onmessage = (e: MessageEvent<FetchResult>) => this.receive(e.data);
+      this.worker.onerror = () => this.receive({ ok: false, status: 0 });
     }
+    const request: FetchRequest = { url: this.url, key: this.key, refs: this.refs };
+    this.worker.postMessage(request);
+  }
+
+  private receive(result: FetchResult): void {
+    if (!this.running) return;
+    if (!result.ok) {
+      const auth = result.status === 401 || result.status === 403;
+      const message = auth
+        ? "Clé API refusée par PRIM"
+        : result.status === 429
+          ? "Quota PRIM atteint, nouvel essai dans 5 min"
+          : result.status === 0
+            ? "PRIM injoignable"
+            : `PRIM indisponible (${result.status})`;
+      this.status = { kind: "error", message, auth };
+      if (auth) this.stop();
+      else this.schedule(result.status === 429 ? BACKOFF_MS : REFRESH_MS);
+      this.onUpdate();
+      return;
+    }
+    const now = Date.now();
+    this.calls = result.calls;
+    this.trains = buildTrains(result.calls, this.track, this.timetable.patterns, now, this.trains);
+    this.byId = new Map(this.trains.map((t) => [t.id, t]));
+    this.lines = new Set(result.calls.map((c) => c.line));
+    this.status = { kind: "ok", at: now, trains: this.trains.length, journeys: result.journeys };
+    this.onUpdate();
+    this.schedule(REFRESH_MS);
   }
 }

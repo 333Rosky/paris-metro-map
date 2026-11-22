@@ -208,8 +208,12 @@ input[type="range"] {
   transition: opacity 0.15s;
 }
 
-.line-btn[aria-pressed="false"] {
-  opacity: 0.25;
+.lines.focused .line-btn[aria-pressed="false"] {
+  opacity: 0.28;
+}
+
+.lines.focused .line-btn[aria-pressed="false"]:hover {
+  opacity: 0.7;
 }
 
 .badge {
@@ -637,4 +641,146 @@ dialog#key-dialog::backdrop {
   border-color: var(--accent);
   color: #111;
   font-weight: 600;
+}
+
+/* Line view ---------------------------------------------------------------- */
+#line-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+}
+
+#line-view[hidden],
+#info-body[hidden] {
+  display: none;
+}
+
+.lv-dirs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  padding-right: 8px;
+}
+
+.lv-dirs span {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.lv-dirs .num {
+  margin-left: auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.lv-arrow {
+  color: var(--fg);
+  font-weight: 600;
+  width: 12px;
+}
+
+.lv-svg {
+  display: block;
+  flex: none;
+}
+
+.lv-scroll {
+  overflow-x: auto;
+}
+
+.lv-track path {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.lv-stops circle {
+  fill: var(--bg);
+  stroke: var(--c);
+  stroke-width: 2.5;
+}
+
+.lv-stops circle.hub {
+  stroke: #e6e7ec;
+}
+
+.lv-stops text {
+  fill: var(--fg);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.lv-stops text:hover,
+.lv-stops text:focus-visible {
+  fill: var(--accent);
+  outline: none;
+}
+
+.lv-train {
+  cursor: pointer;
+  outline: none;
+}
+
+.lv-train path {
+  fill: var(--c);
+  stroke: #fff;
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+}
+
+.lv-train .lv-hit {
+  fill: transparent;
+}
+
+.lv-train.est {
+  opacity: 0.45;
+}
+
+.lv-train:hover path,
+.lv-train:focus-visible path,
+.lv-train.sel path {
+  stroke-width: 2.6;
+}
+
+.back {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+  margin-right: -2px;
+}
+
+.back:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.badge-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-grid;
+}
+
+.badge-btn:hover .badge {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+}
+
+.approx {
+  opacity: 0.55;
+}
+
+.board tbody tr:not([data-trip]) {
+  cursor: default;
 }

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Refuses a commit that would publish the PRIM API key.
+# Enabled by `npm install` (see "prepare" in package.json) or:
+#   git config core.hooksPath .githooks
+set -e
+
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '(^|/)\.env(\..*)?$'; then
+  echo "pre-commit: a .env file is staged; it must stay out of the repository." >&2
+  exit 1
+fi
+
+root=$(git rev-parse --show-toplevel)
+[ -f "$root/.env" ] || exit 0
+key=$(sed -n 's/^PRIM_API_KEY=//p' "$root/.env" | head -n 1 | tr -d '\r"'"'"' ')
+[ -n "$key" ] || exit 0
+
+if git diff --cached -U0 | grep -qF -- "$key"; then
+  echo "pre-commit: the staged changes contain the PRIM API key from .env. Commit refused." >&2
+  exit 1
+fi

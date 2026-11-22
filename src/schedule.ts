@@ -2,15 +2,21 @@ import type { Network, Pattern, Timetable, Trip } from "./types";
 
 export const DAY = 86_400;
 
-export interface TrainState {
-  trip: Trip;
-  pattern: Pattern;
+/** Where a train is along its pattern. */
+export interface PatternState {
   /** Distance along the shape, metres. */
   dist: number;
   /** Index of the last stop reached. */
   stop: number;
   /** True while dwelling at `stop`. */
   dwelling: boolean;
+  /** Progress from `stop` to the next stop, 0..1 (0 while dwelling). */
+  frac: number;
+}
+
+export interface TrainState extends PatternState {
+  trip: Trip;
+  pattern: Pattern;
 }
 
 export interface StationEvent {
@@ -31,6 +37,27 @@ export function shiftDate(date: string, days: number): string {
 /** Accelerate out of a station and brake into the next one; monotonic on [0, 1]. */
 function ease(f: number): number {
   return f - Math.sin(2 * Math.PI * f) / (2 * Math.PI);
+}
+
+/** State of a run `tau` seconds after its first departure; null outside the run. */
+export function patternState(pattern: Pattern, tau: number): PatternState | null {
+  const { arr, dep, dist } = pattern;
+  const last = arr.length - 1;
+  if (tau < 0 || tau > arr[last]) return null;
+  let k = 0;
+  let lo = 0;
+  let hi = last;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] <= tau) {
+      k = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  if (tau <= dep[k] || k === last) return { dist: dist[k], stop: k, dwelling: true, frac: 0 };
+  const span = arr[k + 1] - dep[k];
+  const frac = span > 0 ? ease((tau - dep[k]) / span) : 1;
+  return { dist: dist[k] + (dist[k + 1] - dist[k]) * frac, stop: k, dwelling: false, frac };
 }
 
 export class Schedule {
@@ -88,24 +115,7 @@ export class Schedule {
   state(trip: Trip, t: number): TrainState | null {
     if (t < trip.start || t > trip.end) return null;
     const pattern = this.timetable.patterns[trip.pattern];
-    const tau = t - trip.start;
-    const { arr, dep, dist } = pattern;
-    let k = 0;
-    let lo = 0;
-    let hi = arr.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid] <= tau) {
-        k = mid;
-        lo = mid + 1;
-      } else hi = mid - 1;
-    }
-    if (tau <= dep[k] || k === arr.length - 1) {
-      return { trip, pattern, dist: dist[k], stop: k, dwelling: true };
-    }
-    const span = arr[k + 1] - dep[k];
-    const f = span > 0 ? ease((tau - dep[k]) / span) : 1;
-    return { trip, pattern, dist: dist[k] + (dist[k + 1] - dist[k]) * f, stop: k, dwelling: false };
+    return { trip, pattern, ...patternState(pattern, t - trip.start)! };
   }
 
   active(t: number): TrainState[] {

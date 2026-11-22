@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-// Live mode against a simulated PRIM "estimated-timetable" response.
+// Live mode against PRIM "estimated-timetable" responses, without calling PRIM.
 //
-// The fake feed is derived from the timetable itself: every run of lines 1 and
-// 14 in service at 08:30 on a Tue–Thu, delayed by DELAY seconds, with the
-// remaining calls only (as PRIM sends them). Other lines are absent from the
-// feed, so they must stay on scheduled positions.
+// 1. A simulated feed derived from the timetable itself: every run of lines 1
+//    and 14 in service at 08:30 on a Tue–Thu, delayed by DELAY seconds, with
+//    the remaining calls only. Other lines are absent from the feed, so they
+//    must stay on scheduled positions.
+// 2. A real capture (metro part only, tests/fixtures), where journeys are not
+//    physical trains and trains must be rebuilt from per-stop predictions.
 
 const network = JSON.parse(readFileSync("public/data/network.json", "utf8"));
 const timetable = JSON.parse(readFileSync("public/data/timetable.json", "utf8"));
@@ -61,6 +63,7 @@ function fakeFeed() {
       journeys.push({
         LineRef: { value: `STIF:Line::${network.lines[p.line].ref}:` },
         DatedVehicleJourneyRef: { value: `TEST:${s}:${i}` },
+        DestinationRef: { value: `STIF:StopPoint:Q:${codeOf.get(p.stops[p.stops.length - 1])}:` },
         DestinationName: [{ value: p.headsign }],
         EstimatedCalls: { EstimatedCall: calls },
       });
@@ -76,8 +79,8 @@ function fakeFeed() {
   };
 }
 
-async function setup(page: Page, opts: { key?: string; respond?: (route: Route) => Promise<void> }) {
-  await page.clock.setFixedTime(NOW);
+async function setup(page: Page, opts: { key?: string; now?: number; respond?: (route: Route) => Promise<void> }) {
+  await page.clock.setFixedTime(opts.now ?? NOW);
   if (opts.key) {
     await page.addInitScript((k) => localStorage.setItem("prim-api-key", k), opts.key);
   }
@@ -145,6 +148,50 @@ test("with a key, trains of covered lines follow the real-time feed", async ({ p
   await expect(page.locator("#info .rt-tag")).toBeVisible();
   await expect(page.locator("#info .stops li")).not.toHaveCount(0);
   await page.screenshot({ path: info.outputPath("live-train.png") });
+});
+
+test("a real PRIM capture rebuilds trains from per-stop predictions", async ({ page }, info) => {
+  test.slow();
+  const fixture = readFileSync("tests/fixtures/prim-metro-20261122T184801Z.json", "utf8");
+  const capturedAt = Date.parse(JSON.parse(fixture).Siri.ServiceDelivery.ResponseTimestamp);
+  await setup(page, {
+    key: "test-key",
+    now: capturedAt,
+    respond: (route) =>
+      route.fulfill({ body: fixture, contentType: "application/json", headers: { "access-control-allow-origin": "*" } }),
+  });
+  await page.goto("./?live");
+  await page.waitForFunction(() => (window as any).metro?.state.realtime, null, { timeout: 15_000 });
+
+  const result = await page.evaluate(() => {
+    const m = (window as any).metro;
+    const lines = m.schedule.network.lines;
+    const perLine: Record<string, { rt: number; scheduled: number }> = {};
+    for (const l of lines) perLine[l.id] = { rt: 0, scheduled: 0 };
+    for (const r of m.running()) perLine[lines[r.line].id][r.id.startsWith("rt:") ? "rt" : "scheduled"]++;
+    return { perLine, calls: m.feed.calls.length };
+  });
+  await info.attach("trains-per-line.json", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
+
+  // The capture has 2 827 predictions on every line but the 6.
+  expect(result.calls).toBeGreaterThan(2700);
+  const covered = Object.entries(result.perLine).filter(([id]) => id !== "6");
+  for (const [id, n] of covered) {
+    expect(n.rt, `line ${id} has real-time trains`).toBeGreaterThan(0);
+    expect(n.scheduled, `line ${id} shows no scheduled stand-in`).toBe(0);
+  }
+  expect(result.perLine["6"].rt).toBe(0);
+  // 244 trains were scheduled on the covered lines at that time (Sunday 19:48).
+  const total = covered.reduce((sum, [, n]) => sum + n.rt, 0);
+  expect(total).toBeGreaterThan(200);
+  expect(total).toBeLessThan(320);
+  // Lines without branches match the timetable closely: 11, 24, 20 and 24 scheduled.
+  for (const [id, min, max] of [["3", 8, 15], ["4", 18, 30], ["12", 15, 26], ["14", 18, 30]] as const) {
+    expect(result.perLine[id].rt, `line ${id}`).toBeGreaterThanOrEqual(min);
+    expect(result.perLine[id].rt, `line ${id}`).toBeLessThanOrEqual(max);
+  }
+  await page.waitForTimeout(1500);
+  await page.screenshot({ path: info.outputPath("live-real-capture.png") });
 });
 
 test("a refused key surfaces an actionable error", async ({ page }) => {
