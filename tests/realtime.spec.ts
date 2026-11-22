@@ -101,6 +101,8 @@ test("without a key, Direct asks for one and can fall back to the timetable", as
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Horaires théoriques" }).click();
   await expect(dialog).toBeHidden();
+  // The dialog's close event is dispatched as a separate task.
+  await page.waitForFunction(() => (window as any).metro.state.live);
   await expect(page.locator("#clock")).toHaveText("08:30:00");
   const s = await state(page);
   expect(s.live).toBe(true);
