@@ -45,6 +45,9 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - Free tier checked on the account before creating anything (`aws freetier get-free-tier-usage`, 22 Nov): Lambda 27k / 400k GB-s and 107k / 1M requests used this month by other projects, CloudWatch 0.12 / 5 GB, KMS 5.9k / 20k requests, no DynamoDB table anywhere in eu-west-3. All offers reported as "Always Free"; the account predates the 2025 free/paid plans.
 - Verified on AWS: stored key equals `.env`; cold first call 1.9 s (PRIM fetched in ~1 s), then ~0.2 s; key absent from body and headers; one CORS header; 405/404/204 as designed; 8 simultaneous requests on a due snapshot across 10 instances made exactly one PRIM request.
 - Limit found: the account allows 10 concurrent Lambda executions in eu-west-3, so 12 simultaneous requests got one 429. The site now retries a failed relay request quietly twice (5 s, 10 s) before showing an error.
+- Table size check: a 95 KB test item (twice a daytime snapshot) was written and read back on the 10/10 table, then deleted (93 write units from the unused-capacity reserve).
+- Production checked 2026-11-23 01:07 on https://333rosky.github.io/paris-metro-map/?live with no key in the browser: relay mode, feed ok (178 journeys at end of service), 53 real-time trains on 14 lines, lines 6 and 7bis from the timetable, no key dialog, no `apikey` header, no console error; published scripts contain the relay address and not the key.
+- CI: the line-view test read the train counter before the next frame (failed once on the runner); it now waits for it.
 - AWS sign-in on this machine: `aws login --profile paris-metro --region us-east-2 --remote`, link opened in a private Chrome window, code pasted back by the user. The default flow (redirect to 127.0.0.1) cannot work from WSL here.
 
 ## Status
