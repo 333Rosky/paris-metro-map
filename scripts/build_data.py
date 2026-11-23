@@ -342,7 +342,25 @@ def build(gtfs_path: Path, out_dir: Path) -> None:
         stop_refs[stop_id.split(":")[-1]] = idx
         if s["parent_station"]:
             stop_refs.setdefault(s["parent_station"].split(":")[-1], idx)
-    network = {"lines": lines, "shapes": shapes_out, "stations": stations, "stopRefs": stop_refs}
+    # Station entrances (GTFS location_type 2), attached to their station by
+    # parent_station: [lon, lat, station index, name]. Duplicates (same place,
+    # same name) are dropped.
+    entrances = []
+    seen = set()
+    for e in read_csv(zf, "stops.txt"):
+        if e["location_type"] != "2":
+            continue
+        idx = station_index.get(e["parent_station"])
+        if idx is None:
+            continue
+        lon, lat = round(float(e["stop_lon"]), 6), round(float(e["stop_lat"]), 6)
+        key = (round(lon, 5), round(lat, 5), e["stop_name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        entrances.append([lon, lat, idx, e["stop_name"]])
+    log(f"{len(entrances)} entrances")
+    network = {"lines": lines, "shapes": shapes_out, "stations": stations, "stopRefs": stop_refs, "entrances": entrances}
     timetable = {
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "source": GTFS_URL,

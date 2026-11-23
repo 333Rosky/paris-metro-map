@@ -155,7 +155,8 @@ test("a branched line is laid out with its branches side by side @mobile", async
 
 test("zoomed in, trains are 3D boxes drawn to scale along the track", async ({ page }, info) => {
   const date = await pickWeekday(page);
-  await open(page, `date=${date}&time=08:30&paused#15.2/48.8584/2.3470/-30/60`);
+  // Below the zoom where trains turn into their real stock.
+  await open(page, `date=${date}&time=08:30&paused#14.6/48.8584/2.3470/-30/60`);
   await page.waitForTimeout(500);
   const bodies = await page.evaluate(() => {
     const m = (window as any).metro.map;
@@ -244,6 +245,34 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
   expect(await page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
   await page.waitForTimeout(2000);
   await page.screenshot({ path: info.outputPath("train-3d.png") });
+});
+
+// Zoomed in, every train on screen is its rolling stock (no more boxes in the
+// line colour), stations have platforms under their vault, and the street
+// entrances of the open data are drawn with their "M".
+test("zoomed in, every train is its real stock, and stations have platforms and entrances", async ({ page }, info) => {
+  test.slow(); // many meshes under software WebGL
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:30&paused#16.2/48.8689/2.3093/20/55`);
+  const state = () => page.evaluate(() => (window as any).metro.state);
+  await expect.poll(async () => (await state()).meshes, { timeout: 20_000 }).toBeGreaterThan(5);
+  // Each meshed train leaves one flat footprint (shadow, click target) instead of a box.
+  const counts = await page.evaluate(() => {
+    const metro = (window as any).metro;
+    const feats = metro.map.getSource("train-3d").serialize().data.features;
+    return { footprints: feats.filter((f: any) => f.properties.top < 0.1).length, meshes: metro.state.meshes };
+  });
+  expect(counts.footprints).toBe(counts.meshes);
+  // Franklin D. Roosevelt (lines 1 and 9) and its neighbours: both sides of each line.
+  expect((await state()).platforms).toBeGreaterThanOrEqual(4);
+  const entrances = await page.evaluate(() => {
+    const m = (window as any).metro.map;
+    return { data: m.getSource("entrances").serialize().data.features.length, drawn: m.queryRenderedFeatures({ layers: ["entrance-labels"] }).length };
+  });
+  expect(entrances.data).toBeGreaterThan(1000);
+  await expect.poll(() => page.evaluate(() => (window as any).metro.map.queryRenderedFeatures({ layers: ["entrance-labels"] }).length)).toBeGreaterThan(3);
+  await page.waitForTimeout(1500);
+  await page.screenshot({ path: info.outputPath("stations-3d.png") });
 });
 
 // Every line opens as the stock that runs most of its service in November 2026
@@ -386,8 +415,9 @@ test("a line 14 train opens as a real MP 14: eight cars, drawn as a mesh", async
 
   await page.locator("#close").click();
   await expect.poll(() => page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
-  // Back to a box: only its front end is white (line 14 writes in white).
-  await expect.poll(() => white(id)).toBeLessThan(drawn / 5);
+  // Closed, it stays its rolling stock: zoomed in, every train on screen is a mesh.
+  expect((await page.evaluate(() => (window as any).metro.state)).meshes).toBeGreaterThan(0);
+  expect(await white(id)).toBeGreaterThan(drawn / 2);
 });
 
 test("late evening runs continue past midnight on the next day @mobile", async ({ page }, info) => {

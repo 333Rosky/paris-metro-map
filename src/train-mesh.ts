@@ -11,7 +11,7 @@
 import { MercatorCoordinate, type CustomLayerInterface, type CustomRenderMethodInput, type Map as MapLibreMap } from "maplibre-gl";
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { metresPerPixel, pointBeyond, type MeasuredShape } from "./geo";
+import { metresPerPixel, pointAside, type MeasuredShape } from "./geo";
 import { stockLength, type Stock } from "./stock";
 
 // Car frame: x forward along the car, y to its left, z up, in metres; the
@@ -299,8 +299,10 @@ function texture(canvas: HTMLCanvasElement, anisotropy: number): THREE.CanvasTex
 
 // A train ---------------------------------------------------------------------
 
-/** Cars from the rear of the train to its head, each centred on its own origin. */
-function buildTrain(stock: Stock, anisotropy: number): THREE.Group[] {
+type Kind = "tail" | "middle" | "head";
+
+/** The three kinds of car of a train (rear, middle, head), each centred on its own origin. */
+function buildTrain(stock: Stock, anisotropy: number): Record<Kind, THREE.Group> {
   const pr = profile(stock);
   const { length, width, top, side, roof: roofPts, ring, arc, arcTotal } = pr;
   const lv = stock.livery;
@@ -392,9 +394,7 @@ function buildTrain(stock: Stock, anisotropy: number): THREE.Group[] {
     { x: half - 0.1, sy: 0.955, sz: 0.99, rake: ramp(half - 0.1) },
     { x: half, sy: 0.9, sz: 0.975, rake: r },
   ];
-  const out: THREE.Group[] = [];
-  for (let i = 0; i < stock.cars; i++) out.push(i === 0 ? car(nose, "tail") : i === stock.cars - 1 ? car(nose, "head") : car(middle, null));
-  return out;
+  return { tail: car(nose, "tail"), middle: car(middle, null), head: car(nose, "head") };
 }
 
 // The map layer ---------------------------------------------------------------
@@ -406,22 +406,150 @@ export interface Shown {
   length: number;
 }
 
+/** A train to draw: its stock, its track, where its centre is, how far right of the track centre line. */
+export interface MeshTrain {
+  id: string;
+  stock: Stock;
+  shape: MeasuredShape;
+  dist: number;
+  side: number;
+}
+
+/** Every car of one kind of one stock, as instanced meshes (one per material). */
+class Fleet {
+  readonly meshes: THREE.InstancedMesh[] = [];
+  count = 0;
+  constructor(
+    private readonly template: THREE.Group,
+    private readonly scene: THREE.Scene,
+    private capacity = 0,
+  ) {}
+
+  reserve(n: number) {
+    if (n <= this.capacity) return;
+    this.capacity = Math.max(n, this.capacity * 2, 16);
+    for (const m of this.meshes) {
+      this.scene.remove(m);
+      m.dispose();
+    }
+    this.meshes.length = 0;
+    for (const child of this.template.children as THREE.Mesh[]) {
+      const m = new THREE.InstancedMesh(child.geometry, child.material, this.capacity);
+      m.frustumCulled = false;
+      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.meshes.push(m);
+      this.scene.add(m);
+    }
+  }
+
+  set(i: number, matrix: THREE.Matrix4) {
+    for (const m of this.meshes) m.setMatrixAt(i, matrix);
+  }
+
+  commit() {
+    for (const m of this.meshes) {
+      m.count = this.count;
+      m.instanceMatrix.needsUpdate = true;
+    }
+  }
+}
+
+/** One platform: the stretch of `shape` from d0 to d1, on the right of its direction of travel. */
+export interface Platform {
+  shape: MeasuredShape;
+  d0: number;
+  d1: number;
+}
+
+// A Paris station in section, in metres from the line's centre line (one
+// side; the other direction mirrors it): track centre at 1.75, platform from
+// 3.05 to 6.55 at floor height, a tiled wall behind it, and the elliptical vault
+// meeting its other half above the centre line. Estimates from the usual
+// 14 m wide vaulted station, not surveyed.
+const PLATFORM = { inner: 3.05, outer: 6.55, top: 1.05, edge: 0.3, wall: 6.85, wallTop: 2.3, apex: 5.9 };
+
+/** Builds the platforms, widened by `k` across and `sqrt(k)` up like the trains, around `origin`. */
+function buildPlatforms(platforms: Platform[], k: number, origin: MercatorCoordinate, unit: number): THREE.Group {
+  const kv = Math.sqrt(k);
+  const slab: number[] = [];
+  const edge: number[] = [];
+  const wall: number[] = [];
+  const vault: number[] = [];
+  const at = (p: Platform, d: number, lateral: number, z: number): [number, number, number] => {
+    const m = MercatorCoordinate.fromLngLat(pointAside(p.shape, d, lateral * k), 0);
+    return [(m.x - origin.x) / unit, (origin.y - m.y) / unit, z * kv];
+  };
+  /** Quad strip between two lines across the section, sampled along the platform. */
+  const band = (out: number[], p: Platform, a: [number, number], b: [number, number]) => {
+    const n = Math.max(2, Math.ceil((p.d1 - p.d0) / 4));
+    for (let i = 0; i < n; i++) {
+      const d0 = p.d0 + ((p.d1 - p.d0) * i) / n;
+      const d1 = p.d0 + ((p.d1 - p.d0) * (i + 1)) / n;
+      const q = [at(p, d0, a[0], a[1]), at(p, d1, a[0], a[1]), at(p, d1, b[0], b[1]), at(p, d0, b[0], b[1])];
+      out.push(...q[0], ...q[1], ...q[2], ...q[0], ...q[2], ...q[3]);
+    }
+  };
+  const P = PLATFORM;
+  // Vault: quarter ellipse from the top of the wall to the apex over the centre line.
+  const arc: [number, number][] = [];
+  for (let i = 0; i <= 8; i++) {
+    const a = (i / 8) * (Math.PI / 2);
+    arc.push([P.wall * Math.cos(a), P.wallTop + (P.apex - P.wallTop) * Math.sin(a)]);
+  }
+  for (const p of platforms) {
+    band(slab, p, [P.inner, P.top], [P.outer, P.top]); // floor
+    band(slab, p, [P.inner, 0], [P.inner, P.top]); // face towards the track
+    band(edge, p, [P.inner, P.top + 0.01], [P.inner + P.edge, P.top + 0.01]); // white safety edge
+    band(wall, p, [P.wall, 0], [P.wall, P.wallTop]);
+    for (let i = 0; i + 1 < arc.length; i++) band(vault, p, arc[i], arc[i + 1]);
+    // Platform ends.
+    for (const d of [p.d0, p.d1]) {
+      const q = [at(p, d, P.inner, 0), at(p, d, P.outer, 0), at(p, d, P.outer, P.top), at(p, d, P.inner, P.top)];
+      slab.push(...q[0], ...q[1], ...q[2], ...q[0], ...q[2], ...q[3]);
+    }
+  }
+  const g = new THREE.Group();
+  const add = (pos: number[], material: THREE.Material) => {
+    if (!pos.length) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.frustumCulled = false;
+    g.add(mesh);
+  };
+  add(slab, new THREE.MeshStandardMaterial({ color: 0x8b8578, roughness: 0.9, side: THREE.DoubleSide }));
+  add(edge, new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 0.7, side: THREE.DoubleSide }));
+  // Bevelled white tiles: cream walls, and a vault light enough to see the trains through.
+  add(wall, new THREE.MeshStandardMaterial({ color: 0xeee7d6, roughness: 0.5, side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false }));
+  add(vault, new THREE.MeshStandardMaterial({ color: 0xf3ecdc, roughness: 0.5, side: THREE.DoubleSide, transparent: true, opacity: 0.14, depthWrite: false }));
+  return g;
+}
+
 export class TrainMeshLayer implements CustomLayerInterface {
   readonly id = "train-mesh";
   readonly type = "custom" as const;
   readonly renderingMode = "3d" as const;
-  /** The train currently drawn as a mesh, if any. */
+  /** The selected train, when it is drawn as a mesh. */
   shown: Shown | null = null;
+  /** Trains drawn in the last frame, and platforms around the view. */
+  drawn = 0;
+  platforms = 0;
 
   private map!: MapLibreMap;
   private renderer!: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.Camera();
   private readonly key = new THREE.DirectionalLight(0xffffff, 2.1);
-  private readonly trains = new Map<string, THREE.Group[]>();
-  private cars: THREE.Group[] = [];
+  private readonly fleets = new Map<string, Record<Kind, Fleet>>();
   private anchor = new MercatorCoordinate(0, 0, 0);
   private unit = 1;
+  private readonly m = new THREE.Matrix4();
+  private readonly q = new THREE.Quaternion();
+  private readonly v = new THREE.Vector3();
+  private readonly sc = new THREE.Vector3();
+  private readonly zAxis = new THREE.Vector3(0, 0, 1);
+  private stations: { group: THREE.Group; origin: MercatorCoordinate; key: string } | null = null;
 
   onAdd(map: MapLibreMap, gl: WebGL2RenderingContext) {
     this.map = map;
@@ -432,50 +560,103 @@ export class TrainMeshLayer implements CustomLayerInterface {
     this.scene.add(sky, this.key, this.key.target);
   }
 
-  /** Lays the train of `stock` along `shape`, centred on `dist` and heading towards larger distances. */
-  show(id: string, stock: Stock, shape: MeasuredShape, dist: number, zoom: number) {
-    let cars = this.trains.get(stock.model);
-    if (!cars) {
-      cars = buildTrain(stock, this.renderer.capabilities.getMaxAnisotropy());
-      this.trains.set(stock.model, cars);
+  private fleet(stock: Stock): Record<Kind, Fleet> {
+    let f = this.fleets.get(stock.model);
+    if (!f) {
+      const cars = buildTrain(stock, this.renderer.capabilities.getMaxAnisotropy());
+      f = { tail: new Fleet(cars.tail, this.scene), middle: new Fleet(cars.middle, this.scene), head: new Fleet(cars.head, this.scene) };
+      this.fleets.set(stock.model, f);
     }
-    if (cars !== this.cars) {
-      this.scene.remove(...this.cars);
-      this.scene.add(...cars);
-      this.cars = cars;
-    }
-    const length = stockLength(stock);
-    this.anchor = MercatorCoordinate.fromLngLat(pointBeyond(shape, dist), 0);
+    return f;
+  }
+
+  /**
+   * Lays out every train of the frame: each car sits on its two bogie points
+   * along the track, the head towards larger distances. `selected` is
+   * reported in `shown` when it is among them.
+   */
+  update(trains: MeshTrain[], zoom: number, selected: string | null) {
+    const centre = this.map.getCenter();
+    this.anchor = MercatorCoordinate.fromLngLat(centre, 0);
     this.unit = this.anchor.meterInMercatorCoordinateUnits();
-    const local = (d: number): [number, number] => {
-      const m = MercatorCoordinate.fromLngLat(pointBeyond(shape, d), 0);
-      return [(m.x - this.anchor.x) / this.unit, (this.anchor.y - m.y) / this.unit];
+    const local = (t: MeshTrain, d: number): [number, number] => {
+      const p = MercatorCoordinate.fromLngLat(pointAside(t.shape, d, t.side), 0);
+      return [(p.x - this.anchor.x) / this.unit, (this.anchor.y - p.y) / this.unit];
     };
-    // Like the extruded model, the cross-section is widened when the real one
-    // would be thinner than ~8 px; from zoom 18 the train is to scale.
-    const k = Math.max(1, (8 * metresPerPixel(zoom)) / stock.width);
-    const pivot = stock.carLength / 2 - 2.52; // each car sits on its two bogies
-    cars.forEach((car, i) => {
-      const d = dist - length / 2 + (i + 0.5) * stock.carLength;
-      const a = local(d - pivot);
-      const b = local(d + pivot);
-      car.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0);
-      car.rotation.z = Math.atan2(b[1] - a[1], b[0] - a[0]) + (i === 0 ? Math.PI : 0);
-      car.scale.set(1, k, Math.sqrt(k));
-    });
-    this.shown = { id, stock: stock.name, cars: stock.cars, length };
+    const need = new Map<Record<Kind, Fleet>, Record<Kind, number>>();
+    for (const t of trains) {
+      const f = this.fleet(t.stock);
+      const n = need.get(f) ?? { tail: 0, middle: 0, head: 0 };
+      n.tail++;
+      n.head++;
+      n.middle += Math.max(0, t.stock.cars - 2);
+      need.set(f, n);
+    }
+    for (const f of this.fleets.values()) {
+      const n = need.get(f) ?? { tail: 0, middle: 0, head: 0 };
+      for (const kind of ["tail", "middle", "head"] as Kind[]) {
+        f[kind].reserve(n[kind]);
+        f[kind].count = 0;
+      }
+    }
+    this.shown = null;
+    for (const t of trains) {
+      const { stock } = t;
+      const f = this.fleet(stock);
+      const length = stockLength(stock);
+      // Like the extruded model, the cross-section is widened when the real one
+      // would be thinner than ~8 px; from zoom 18 the train is to scale.
+      const k = Math.max(1, (8 * metresPerPixel(zoom)) / stock.width);
+      this.sc.set(1, k, Math.sqrt(k));
+      const pivot = stock.carLength / 2 - 2.52; // each car sits on its two bogies
+      for (let i = 0; i < stock.cars; i++) {
+        const kind: Kind = i === 0 ? "tail" : i === stock.cars - 1 ? "head" : "middle";
+        const d = t.dist - length / 2 + (i + 0.5) * stock.carLength;
+        const a = local(t, d - pivot);
+        const b = local(t, d + pivot);
+        this.v.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0);
+        this.q.setFromAxisAngle(this.zAxis, Math.atan2(b[1] - a[1], b[0] - a[0]) + (kind === "tail" ? Math.PI : 0));
+        this.m.compose(this.v, this.q, this.sc);
+        f[kind].set(f[kind].count++, this.m);
+      }
+      if (t.id === selected) this.shown = { id: t.id, stock: stock.name, cars: stock.cars, length };
+    }
+    for (const f of this.fleets.values()) for (const kind of ["tail", "middle", "head"] as Kind[]) f[kind].commit();
+    this.drawn = trains.length;
+    this.placeStations();
     this.map.triggerRepaint();
   }
 
-  hide() {
-    if (!this.shown) return;
-    this.shown = null;
+  /** Platforms around the view; rebuilt only when the set or the zoom changes. */
+  setPlatforms(platforms: Platform[], key: string, zoom: number) {
+    if (this.stations?.key === key) return;
+    if (this.stations) {
+      this.scene.remove(this.stations.group);
+      this.stations.group.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      this.stations = null;
+    }
+    if (platforms.length) {
+      const origin = MercatorCoordinate.fromLngLat(this.map.getCenter(), 0);
+      const k = Math.max(1, (8 * metresPerPixel(zoom)) / 2.45);
+      const group = buildPlatforms(platforms, k, origin, origin.meterInMercatorCoordinateUnits());
+      this.scene.add(group);
+      this.stations = { group, origin, key };
+    }
+    this.platforms = platforms.length;
+    this.placeStations();
     this.map.triggerRepaint();
+  }
+
+  /** Station geometry is in metres around its own origin: carry it to the trains' anchor. */
+  private placeStations() {
+    if (!this.stations) return;
+    const { origin, group } = this.stations;
+    group.position.set((origin.x - this.anchor.x) / this.unit, (this.anchor.y - origin.y) / this.unit, 0);
   }
 
   render(_gl: WebGL2RenderingContext, args: CustomRenderMethodInput) {
-    if (!this.shown) return;
-    // Scene in metres around the train (x east, y north, z up), carried into
+    if (!this.drawn && !this.stations) return;
+    // Scene in metres around the anchor (x east, y north, z up), carried into
     // the map's mercator space: mercator y points south.
     const local = new THREE.Matrix4()
       .makeTranslation(this.anchor.x, this.anchor.y, this.anchor.z)
@@ -487,6 +668,9 @@ export class TrainMeshLayer implements CustomLayerInterface {
     const canvas = this.map.getCanvas();
     this.renderer.resetState();
     this.renderer.setViewport(0, 0, canvas.width, canvas.height); // three does not follow the map's resizes
+    // The metro runs under the city: like the line traces, trains and stations
+    // show through the buildings (they still hide each other).
+    this.renderer.clearDepth();
     this.renderer.render(this.scene, this.camera);
   }
 }

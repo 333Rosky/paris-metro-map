@@ -6,6 +6,9 @@ const port = (url: string) => new URL(url).port;
 export default defineConfig({
   testDir: "tests",
   timeout: 60_000,
+  // Every page renders 3D in software (SwiftShader, itself multi-threaded): more
+  // than a few browsers at once starve each other. CI keeps Playwright's default.
+  workers: process.env.CI ? undefined : 4,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     baseURL: "http://localhost:4173/",

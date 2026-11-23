@@ -1,8 +1,8 @@
 // Same local projection as scripts/build_data.py, so that stop distances
 // computed by the data pipeline line up with the shapes measured here.
 const LAT0 = 48.86;
-const M_PER_DEG_LAT = 110_540;
-const M_PER_DEG_LON = 111_320 * Math.cos((LAT0 * Math.PI) / 180);
+export const M_PER_DEG_LAT = 110_540;
+export const M_PER_DEG_LON = 111_320 * Math.cos((LAT0 * Math.PI) / 180);
 
 export interface MeasuredShape {
   coords: [number, number][];
@@ -52,6 +52,14 @@ export function pointBeyond(shape: MeasuredShape, d: number): [number, number] {
   return [lon + (Math.sin(rad) * over) / M_PER_DEG_LON, lat + (Math.cos(rad) * over) / M_PER_DEG_LAT];
 }
 
+/** Like pointBeyond, then `side` metres to the right of the direction of travel. */
+export function pointAside(shape: MeasuredShape, d: number, side: number): [number, number] {
+  const [lon, lat] = pointBeyond(shape, d);
+  if (!side) return [lon, lat];
+  const rad = ((pointAt(shape, d)[2] + 90) * Math.PI) / 180;
+  return [lon + (Math.sin(rad) * side) / M_PER_DEG_LON, lat + (Math.cos(rad) * side) / M_PER_DEG_LAT];
+}
+
 function bearing(a: [number, number], b: [number, number]): number {
   const dx = (b[0] - a[0]) * M_PER_DEG_LON;
   const dy = (b[1] - a[1]) * M_PER_DEG_LAT;
@@ -81,9 +89,10 @@ export function sliceAlong(shape: MeasuredShape, d0: number, d1: number): [numbe
 
 /**
  * Closed polygon ring covering the track between d0 and d1, `half` metres on
- * each side of its centre line (miter joins, clamped on sharp turns).
+ * each side of its centre line (miter joins, clamped on sharp turns), the
+ * centre line moved `shift` metres to the right of the direction of travel.
  */
-export function ribbon(shape: MeasuredShape, d0: number, d1: number, half: number): [number, number][] {
+export function ribbon(shape: MeasuredShape, d0: number, d1: number, half: number, shift = 0): [number, number][] {
   const path = sliceAlong(shape, d0, d1);
   // Drop repeated points: they have no direction.
   const pts: [number, number][] = [];
@@ -116,10 +125,12 @@ export function ribbon(shape: MeasuredShape, d0: number, d1: number, half: numbe
     }
     // Miter length, capped so a hairpin does not shoot a spike.
     const cos = nx * -b[1] + ny * b[0];
-    const m = half / Math.max(cos, 0.5);
+    const c = Math.max(cos, 0.5);
+    const ml = (half - shift) / c;
+    const mr = (half + shift) / c;
     const [x, y] = xy[i];
-    left.push([(x + nx * m) / M_PER_DEG_LON, (y + ny * m) / M_PER_DEG_LAT]);
-    right.push([(x - nx * m) / M_PER_DEG_LON, (y - ny * m) / M_PER_DEG_LAT]);
+    left.push([(x + nx * ml) / M_PER_DEG_LON, (y + ny * ml) / M_PER_DEG_LAT]);
+    right.push([(x - nx * mr) / M_PER_DEG_LON, (y - ny * mr) / M_PER_DEG_LAT]);
   }
   const ring = [...left, ...right.reverse()];
   ring.push(ring[0]);

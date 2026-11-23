@@ -26,6 +26,8 @@ export interface Network {
   stations: Station[];
   /** Numeric SIRI stop code (platform or stop area) -> station index. */
   stopRefs: Record<string, number>;
+  /** Station entrances: lon, lat, station index, name (street or place). */
+  entrances: [number, number, number, string][];
 }
 
 /** A sequence of stops shared by many trips; times are offsets from the first departure. */

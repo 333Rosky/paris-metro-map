@@ -77,8 +77,18 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - Checked: one train per line opens with its stock, car count and length (new E2E test); close-ups of each stock family looked at; extruded model still shown when the mesh chunk cannot load (test blocks it).
 - Not done: MF 19 (lines 7bis from 14 Dec 2026, 10 from 2027), MP 89 CA / MP 05 mix of line 4, distinct MP 89 CC cab vs CA panoramic end, per-train stock (the feed does not say), a check on a phone.
 
+## Every train as its stock, stations (2026-11-23)
+- User request (screenshot of line 1 at zoom ~15): "dommage que les trains soient jaunes tant qu'on ne clique pas dessus", "il faudrait aussi modéliser les gares si possible".
+- From zoom 15 every train on screen (300 px margin) is drawn as its stock: `TrainMeshLayer.update` lays out instanced meshes, one `InstancedMesh` per stock, car kind (tail, middle, head) and material, so draw calls do not grow with the number of trains. Off screen and below zoom 15 trains stay boxes. Under each mesh a footprint in a dark shade of the line colour tells the line and takes clicks. The mesh chunk is fetched at zoom 15 or on a click.
+- Two tracks: trains run on the right, 1.75 m (widened like the trains) right of the line's centre line; boxes sit side by side. `trainPosition` follows the drawn track.
+- Trains and platforms are drawn after a depth clear: like the line traces, they show through buildings (they still hide each other). Buildings still fade out around an opened train.
+- Stations: one platform per (shape, station), centred where trains stop, line train length + 6 m, on the right of each direction, from zoom 15.5, rebuilt when the set on screen or the zoom (quarter steps) changes. Section template (estimate, not surveyed): platform 3.05–6.55 m from the centre line at 1.05 m, white edge, cream wall to 2.3 m, translucent elliptical vault to 5.9 m. Island platforms and real station shapes are not modelled.
+- Entrances: GTFS stops of `location_type` 2 attached to their station by `parent_station`, now in `network.json` (`entrances`, 1 173, all 321 stations have some). Drawn from zoom 16 as extrusions (stairwell, railing, totem with the yellow M sign; turned towards the station, the feed has no orientation) plus an "M" label, with the entrance name from zoom 17.5.
+- Data regenerated locally from the 23 Nov GTFS (473 patterns, 30 days from 20261123); CI regenerates it daily anyway.
+- Checked: new E2E test (meshes on screen, one footprint per mesh, platforms around Franklin D. Roosevelt, entrances rendered); screenshots at zoom 15, 16, 17.6 and 19.
+
 ## Status
-- 29 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM, the rolling stock of every line.
+- 30 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM, the rolling stock of every line, trains and stations in 3D.
 
 ## Next
 - Mid-December 2026: switch 7bis to MF 19 (4 cars, IDFM livery); 2027: line 10.

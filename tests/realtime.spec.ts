@@ -114,7 +114,10 @@ test("without a key, Direct asks for one and can fall back to the timetable", as
 });
 
 test("with a key, trains of covered lines follow the real-time feed", async ({ page }, info) => {
-  test.slow(); // live mode keeps rendering; screenshots are slow under software WebGL
+  // Live mode keeps rendering, and the opened train flies the camera into a
+  // street full of 3D trains and stations: slow under software WebGL, slower
+  // still when other tests share the CPU.
+  test.setTimeout(300_000);
   const requests = await setup(page, { key: "test-key" });
   await page.goto("./?live");
   await page.waitForFunction(() => (window as any).metro?.state.realtime, null, { timeout: 15_000 });

@@ -3,13 +3,13 @@ import type { GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "./style.css";
-import { measure, pointAt, type MeasuredShape } from "./geo";
+import { measure, pointAside, pointAt, type MeasuredShape } from "./geo";
 import { LineView } from "./lineview";
 import { PRIM_URL, RealtimeFeed, loadKey, rtState, saveKey, type RtTrain } from "./realtime";
 import { DAY, Schedule, shiftDate } from "./schedule";
 import { STOCK, stockLength } from "./stock";
-import { MODEL_ZOOM, mix, trainBox, trainFootprint, trainModel, type PartFeature } from "./train3d";
-import type { TrainMeshLayer } from "./train-mesh";
+import { MODEL_ZOOM, entranceModel, mix, trackSide, trainBox, trainFootprint, trainModel, widen, type PartFeature } from "./train3d";
+import type { MeshTrain, TrainMeshLayer } from "./train-mesh";
 import type { Line, Network, Pattern, Timetable } from "./types";
 
 // MapLibre 6 resolves its worker at runtime; let Vite emit it as an asset.
@@ -29,6 +29,11 @@ const BODY_ZOOM = 12.5;
 const PITCH_3D = 50;
 const PITCH_TRAIN = 62;
 const ZOOM_TRAIN = 18.3;
+/** From this zoom every train on screen is drawn as its real rolling stock. */
+const MESH_ZOOM = 15;
+/** From these zooms stations get their platforms and their street entrances. */
+const PLATFORM_ZOOM = 15.5;
+const ENTRANCE_ZOOM = 16;
 const BACKGROUND = "#15161b";
 /**
  * Buildings fade in from zoom 13. With a train open they fade out again as
@@ -113,6 +118,21 @@ async function main() {
   const shapes: MeasuredShape[] = network.shapes.map((s) => measure(s.coords));
   const { lines, stations } = network;
   const { patterns } = timetable;
+  // One platform per station, line direction (shape) and side, centred where
+  // trains stop and as long as the line's trains plus a margin.
+  const allPlatforms: { shape: number; line: number; d: number; lon: number; lat: number }[] = [];
+  {
+    const seen = new Set<string>();
+    for (const p of patterns) {
+      p.stops.forEach((st, k) => {
+        const key = `${p.shape}|${st}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const [lon, lat] = pointAt(shapes[p.shape], p.dist[k]);
+        allPlatforms.push({ shape: p.shape, line: p.line, d: p.dist[k], lon, lat });
+      });
+    }
+  }
   const lineBadgeButton = (i: number, size = "") =>
     `<button class="badge-btn" data-line="${i}" aria-label="${escapeHtml(lines[i].name)}">${badge(lines[i], size)}</button>`;
 
@@ -464,9 +484,33 @@ async function main() {
       },
     });
     const empty = { type: "FeatureCollection" as const, features: [] };
+    map.addSource("entrances-3d", { type: "geojson", data: empty });
+    map.addSource("entrances", {
+      type: "geojson",
+      data: {
+        type: "FeatureCollection",
+        features: network.entrances.map(([lon, lat, station, name]) => ({
+          type: "Feature",
+          properties: { station, name },
+          geometry: { type: "Point", coordinates: [lon, lat] },
+        })),
+      },
+    });
     map.addSource("trains", { type: "geojson", data: empty });
     map.addSource("train-3d", { type: "geojson", data: empty });
 
+    // Street entrances: stairs going down, railing, and the yellow "M" totem.
+    map.addLayer({
+      id: "entrances-3d",
+      type: "fill-extrusion",
+      source: "entrances-3d",
+      minzoom: ENTRANCE_ZOOM,
+      paint: {
+        "fill-extrusion-color": ["get", "color"],
+        "fill-extrusion-height": ["get", "top"],
+        "fill-extrusion-base": ["get", "base"],
+      },
+    });
     map.addLayer({
       id: "lines",
       type: "line",
@@ -504,6 +548,21 @@ async function main() {
         "text-max-width": 8,
       },
       paint: { "text-color": "#c9cad1", "text-halo-color": "#0c0d10", "text-halo-width": 1.4 },
+    });
+    map.addLayer({
+      id: "entrance-labels",
+      type: "symbol",
+      source: "entrances",
+      minzoom: ENTRANCE_ZOOM,
+      layout: {
+        "text-field": ["step", ["zoom"], "M", 17.5, ["format", "M", {}, "\n", {}, ["get", "name"], { "font-scale": 0.75 }]],
+        "text-font": FONT,
+        "text-size": ["interpolate", ["linear"], ["zoom"], 16, 10, 19, 14],
+        "text-anchor": "bottom",
+        "text-offset": [0, -0.4],
+        "text-allow-overlap": false,
+      },
+      paint: { "text-color": "#1b1b1b", "text-halo-color": "#ffcd00", "text-halo-width": 2.2 },
     });
     map.addLayer({
       id: "train-halo",
@@ -591,7 +650,8 @@ async function main() {
         renderInfo(true);
       }
     });
-    map.on("zoom", () => (dirty = true));
+    // Moving the map changes which trains are on screen, hence drawn as meshes.
+    map.on("move", () => (dirty = true));
 
     applyFocus();
     ready = true;
@@ -861,6 +921,21 @@ async function main() {
   let bodiesShown = false;
   let buildingsXray = false;
 
+  // Entrances, as extrusions in metres widened like the trains: rebuilt when
+  // the zoom moves by a quarter step.
+  let entrancesZoom = -1;
+  function updateEntrances(zoom: number) {
+    const zKey = Math.round(zoom * 4) / 4;
+    if (zKey === entrancesZoom) return;
+    entrancesZoom = zKey;
+    const k = widen(zKey);
+    const features: PartFeature[] = [];
+    for (const [lon, lat, station] of network.entrances) {
+      entranceModel(features, lon, lat, stations[station].lon, stations[station].lat, k);
+    }
+    (map.getSource("entrances-3d") as GeoJSONSource).setData({ type: "FeatureCollection", features });
+  }
+
   function draw() {
     const all = running();
     const visible = focus === null ? all : all.filter((r) => r.line === focus);
@@ -870,35 +945,60 @@ async function main() {
     const points = [];
     const parts: PartFeature[] = [];
     let followed: [number, number, number] | null = null;
-    let meshed = false;
+    // From MESH_ZOOM every train on screen is drawn as its real stock (once
+    // the mesh code is there); further out, and off screen, trains are boxes.
+    const meshZoom = zoom >= MESH_ZOOM;
+    if (meshZoom && !meshLayer) loadMesh();
+    const canvas = map.getCanvas();
+    const margin = 300;
+    const onScreen = (lon: number, lat: number) => {
+      const p = map.project([lon, lat]);
+      return p.x > -margin && p.y > -margin && p.x < canvas.clientWidth + margin && p.y < canvas.clientHeight + margin;
+    };
+    const meshes: MeshTrain[] = [];
     for (const r of visible) {
       const shape = shapes[r.pattern.shape];
       const [lon, lat, heading] = pointAt(shape, r.dist);
       const line = lines[r.line];
       const sel = r.id === selected;
-      const model = sel && zoom >= MODEL_ZOOM;
-      const stock = model ? STOCK[line.id] : undefined;
-      if (stock && !meshLayer) loadMesh();
-      const mesh = stock && meshLayer ? meshLayer : null;
-      // A mesh carries no line number on its roof.
+      const stock = STOCK[line.id];
+      if (stock && sel && zoom >= MODEL_ZOOM && !meshLayer) loadMesh();
+      const mesh = !!(stock && meshLayer && withBodies && (meshZoom || (sel && zoom >= MODEL_ZOOM)) && onScreen(lon, lat));
+      // A mesh carries no line number on its roof: its footprint has the line colour.
       const properties = { id: r.id, color: line.color, text: line.text, label: mesh ? "" : line.id, est: r.est, sel };
       points.push({ type: "Feature" as const, properties, geometry: { type: "Point" as const, coordinates: [lon, lat] } });
       if (sel) followed = [lon, lat, heading];
       if (!withBodies) continue;
       const length = trainLength(line.id);
+      const side = trackSide(zoom, mesh);
+      // Timetable stand-ins (live mode, line missing from the feed) fade into the background.
+      const color = r.est ? mix(line.color, BACKGROUND, 0.6) : line.color;
       if (mesh && stock) {
-        mesh.show(r.id, stock, shape, r.dist, zoom);
-        trainFootprint(parts, shape, r.dist, stockLength(stock), zoom, r.id);
-        meshed = true;
-      } else if (model) trainModel(parts, shape, r.dist, length, zoom, line.color, r.id);
+        meshes.push({ id: r.id, stock, shape, dist: r.dist, side });
+        trainFootprint(parts, shape, r.dist, stockLength(stock), zoom, mix(color, BACKGROUND, 0.35), r.id, side);
+      } else if (sel && zoom >= MODEL_ZOOM) trainModel(parts, shape, r.dist, length, zoom, line.color, r.id, side);
       else {
-        // Timetable stand-ins (live mode, line missing from the feed) fade into the background.
-        const color = r.est ? mix(line.color, BACKGROUND, 0.6) : line.color;
         const front = r.est ? mix(line.text, BACKGROUND, 0.6) : line.text;
-        trainBox(parts, shape, r.dist, length, zoom, color, front, r.id);
+        trainBox(parts, shape, r.dist, length, zoom, color, front, r.id, side);
       }
     }
-    if (!meshed) meshLayer?.hide();
+    meshLayer?.update(meshes, zoom, selected);
+    if (meshLayer) {
+      const near =
+        zoom >= PLATFORM_ZOOM
+          ? allPlatforms.filter((p) => (focus === null || p.line === focus) && onScreen(p.lon, p.lat))
+          : [];
+      const zKey = Math.round(zoom * 4) / 4;
+      meshLayer.setPlatforms(
+        near.map((p) => {
+          const half = trainLength(lines[p.line].id) / 2 + 3;
+          return { shape: shapes[p.shape], d0: p.d - half, d1: p.d + half };
+        }),
+        near.length ? `${zKey}|${near.map((p) => `${p.shape}:${Math.round(p.d)}`).join(",")}` : "",
+        zKey,
+      );
+    }
+    if (zoom >= ENTRANCE_ZOOM) updateEntrances(zoom);
     (map.getSource("trains") as GeoJSONSource).setData({ type: "FeatureCollection", features: points });
     if (withBodies || bodiesShown) {
       (map.getSource("train-3d") as GeoJSONSource).setData({ type: "FeatureCollection", features: parts });
@@ -991,11 +1091,12 @@ async function main() {
       trainPosition(id: string, offset = 0): [number, number] | null {
         const r = running().find((x) => x.id === id);
         if (!r) return null;
-        const [lon, lat] = pointAt(shapes[r.pattern.shape], r.dist + offset);
-        return [lon, lat];
+        // On its own track, as drawn (meshes and boxes sit right of the centre line).
+        const zoom = map.getZoom();
+        return pointAside(shapes[r.pattern.shape], r.dist + offset, trackSide(zoom, !!meshLayer && zoom >= MESH_ZOOM));
       },
       get state() {
-        return { date, t, playing, speed, focus, selection, ready, live, realtime: realtime(), mesh: meshLayer?.shown ?? null };
+        return { date, t, playing, speed, focus, selection, ready, live, realtime: realtime(), mesh: meshLayer?.shown ?? null, meshes: meshLayer?.drawn ?? 0, platforms: meshLayer?.platforms ?? 0 };
       },
     },
   });
