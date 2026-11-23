@@ -50,8 +50,16 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - CI: the line-view test read the train counter before the next frame (failed once on the runner); it now waits for it.
 - AWS sign-in on this machine: `aws login --profile paris-metro --region us-east-2 --remote`, link opened in a private Chrome window, code pasted back by the user. The default flow (redirect to 127.0.0.1) cannot work from WSL here.
 
+## 3D map and live by default (2026-11-23)
+- User request: "la map en 3D, les trains aussi quand on clique dessus, pourquoi on ne peut pas suivre en direct ?"
+- Why: following did work in production (probe 01:09: an rt train stayed selected and followed across 3 feed refreshes), but the site opened on the timetable at ×10, Direct had to be clicked. It now opens in Direct when a relay is set, unless the link pins a moment (`date`/`time`/`speed`/`paused`). The metro publishes no GPS: live positions remain rebuilt from per-stop predictions.
+- 3D: map tilted (pitch 50, maxPitch 78), sky, OpenMapTiles buildings as fill-extrusion (render_height), 2D/3D button. Trains are fill-extrusion boxes along the track (width kept at a few px, length to scale, front end in the line's text colour). The selected train, from zoom 15.8, is a detailed model (cars, windows, livery stripe, roof, cab lights; real scale at zoom ≥ 18). Click flies the camera beside it (zoom 18.3, pitch 62).
+- Found: MapLibre depth-tests all extrusions together, so buildings hid the train (the line runs under them). With a train open, buildings fade to opacity 0 between zoom 15.2 and 16.2 (MapLibre skips a layer at 0, depth included).
+- Following now redraws every frame (was 10 fps in live mode) and pauses while the camera is moving.
+- Not done: terrain relief, a real 3D mesh (three.js) for rolling-stock types per line.
+
 ## Status
-- 25 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
+- 27 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
 
 ## Next
 - Later: RER/tram; PRIM disruptions on the line view.

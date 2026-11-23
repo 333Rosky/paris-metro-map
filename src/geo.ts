@@ -65,3 +65,55 @@ export function sliceAlong(shape: MeasuredShape, d0: number, d1: number): [numbe
   out.push([end[0], end[1]]);
   return out;
 }
+
+/**
+ * Closed polygon ring covering the track between d0 and d1, `half` metres on
+ * each side of its centre line (miter joins, clamped on sharp turns).
+ */
+export function ribbon(shape: MeasuredShape, d0: number, d1: number, half: number): [number, number][] {
+  const path = sliceAlong(shape, d0, d1);
+  // Drop repeated points: they have no direction.
+  const pts: [number, number][] = [];
+  for (const p of path) {
+    const q = pts[pts.length - 1];
+    if (!q || Math.abs(q[0] - p[0]) > 1e-9 || Math.abs(q[1] - p[1]) > 1e-9) pts.push(p);
+  }
+  if (pts.length < 2) return [];
+  const xy = pts.map(([lon, lat]) => [lon * M_PER_DEG_LON, lat * M_PER_DEG_LAT]);
+  const dir = (i: number) => {
+    const dx = xy[i + 1][0] - xy[i][0];
+    const dy = xy[i + 1][1] - xy[i][1];
+    const l = Math.hypot(dx, dy) || 1;
+    return [dx / l, dy / l];
+  };
+  const left: [number, number][] = [];
+  const right: [number, number][] = [];
+  for (let i = 0; i < xy.length; i++) {
+    const a = dir(Math.max(0, i - 1));
+    const b = dir(Math.min(xy.length - 2, i));
+    let nx = -(a[1] + b[1]);
+    let ny = a[0] + b[0];
+    const l = Math.hypot(nx, ny);
+    if (l < 1e-6) {
+      nx = -b[1];
+      ny = b[0];
+    } else {
+      nx /= l;
+      ny /= l;
+    }
+    // Miter length, capped so a hairpin does not shoot a spike.
+    const cos = nx * -b[1] + ny * b[0];
+    const m = half / Math.max(cos, 0.5);
+    const [x, y] = xy[i];
+    left.push([(x + nx * m) / M_PER_DEG_LON, (y + ny * m) / M_PER_DEG_LAT]);
+    right.push([(x - nx * m) / M_PER_DEG_LON, (y - ny * m) / M_PER_DEG_LAT]);
+  }
+  const ring = [...left, ...right.reverse()];
+  ring.push(ring[0]);
+  return ring;
+}
+
+/** Ground resolution (metres per CSS pixel) of a MapLibre map at `zoom` around Paris. */
+export function metresPerPixel(zoom: number): number {
+  return (40_075_016.686 * Math.cos((LAT0 * Math.PI) / 180)) / (512 * 2 ** zoom);
+}

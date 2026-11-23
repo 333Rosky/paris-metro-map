@@ -3,10 +3,11 @@ import type { GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "./style.css";
-import { measure, pointAt, sliceAlong, type MeasuredShape } from "./geo";
+import { measure, pointAt, type MeasuredShape } from "./geo";
 import { LineView } from "./lineview";
 import { PRIM_URL, RealtimeFeed, loadKey, rtState, saveKey, type RtTrain } from "./realtime";
 import { DAY, Schedule, shiftDate } from "./schedule";
+import { MODEL_ZOOM, mix, trainBox, trainModel, type PartFeature } from "./train3d";
 import type { Line, Network, Pattern, Timetable } from "./types";
 
 // MapLibre 6 resolves its worker at runtime; let Vite emit it as an asset.
@@ -20,6 +21,20 @@ const TRAIN_LENGTH: Record<string, number> = { "1": 90, "4": 90, "14": 120, "3B"
 const DEFAULT_TRAIN_LENGTH = 75;
 /** Below this zoom a train is shorter than its dot: bodies are not built. */
 const BODY_ZOOM = 12.5;
+/** Camera tilt of the 3D view, and when a train is opened. */
+const PITCH_3D = 50;
+const PITCH_TRAIN = 62;
+const ZOOM_TRAIN = 18.3;
+const BACKGROUND = "#15161b";
+/**
+ * Buildings fade in from zoom 13. With a train open they fade out again as
+ * the camera closes in: the metro runs under them and extrusions hide each
+ * other (at opacity 0 MapLibre skips the layer, depth included).
+ */
+const BUILDINGS_OPACITY = ["interpolate", ["linear"], ["zoom"], 13, 0, 14.5, 0.72] as maplibregl.ExpressionSpecification;
+const BUILDINGS_OPACITY_TRAIN = [
+  "interpolate", ["linear"], ["zoom"], 13, 0, 14.5, 0.72, 15.2, 0.72, 16.2, 0,
+] as maplibregl.ExpressionSpecification;
 
 type Selection = { kind: "train"; id: string } | { kind: "station"; index: number } | null;
 
@@ -312,6 +327,9 @@ async function main() {
     style: MAP_STYLE,
     center: [2.3415, 48.8586],
     zoom: mobile() ? 10.8 : 11.8,
+    pitch: mobile() ? 40 : PITCH_3D,
+    bearing: -12,
+    maxPitch: 78,
     hash: true,
     attributionControl: {
       compact: true,
@@ -319,7 +337,36 @@ async function main() {
         'Horaires et temps réel © <a href="https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/" target="_blank" rel="noopener">Île-de-France Mobilités</a> (ODbL)',
     },
   });
-  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+  // 2D / 3D switch: flat top-down view or tilted view with buildings.
+  const viewBtn = document.createElement("button");
+  viewBtn.id = "view-3d";
+  viewBtn.type = "button";
+  viewBtn.className = "view-3d";
+  const syncViewBtn = () => {
+    const tilted = map.getPitch() > 5;
+    viewBtn.textContent = tilted ? "2D" : "3D";
+    viewBtn.title = tilted ? "Vue à plat" : "Vue en 3D";
+    viewBtn.setAttribute("aria-label", viewBtn.title);
+  };
+  viewBtn.addEventListener("click", () => {
+    if (map.getPitch() > 5) map.easeTo({ pitch: 0, bearing: 0, duration: 700 });
+    else map.easeTo({ pitch: PITCH_3D, bearing: -12, duration: 700 });
+  });
+  map.addControl(
+    {
+      onAdd: () => {
+        const box = document.createElement("div");
+        box.className = "maplibregl-ctrl maplibregl-ctrl-group";
+        box.append(viewBtn);
+        return box;
+      },
+      onRemove: () => viewBtn.parentElement?.remove(),
+    },
+    "bottom-right",
+  );
+  map.on("pitchend", syncViewBtn);
+  syncViewBtn();
 
   const applyFocus = () => {
     if (!map.getLayer("lines")) return;
@@ -363,6 +410,30 @@ async function main() {
       if (layer.type === "symbol") map.setPaintProperty(layer.id, "text-opacity", 0.5);
     }
     document.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show");
+    map.setSky({
+      "sky-color": "#07080b",
+      "horizon-color": "#1d2030",
+      "fog-color": "#101118",
+      "sky-horizon-blend": 0.6,
+      "horizon-fog-blend": 0.7,
+      "fog-ground-blend": 0.4,
+      "atmosphere-blend": 0,
+    });
+    // Buildings in volume (OpenMapTiles heights), dark and see-through so the
+    // network, which runs underneath, stays readable.
+    map.addLayer({
+      id: "buildings-3d",
+      type: "fill-extrusion",
+      source: "openmaptiles",
+      "source-layer": "building",
+      minzoom: 13,
+      paint: {
+        "fill-extrusion-color": ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 10], 0, "#1a1b21", 60, "#262833"],
+        "fill-extrusion-height": ["interpolate", ["linear"], ["zoom"], 13, 0, 14, ["coalesce", ["get", "render_height"], 10]],
+        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+        "fill-extrusion-opacity": BUILDINGS_OPACITY,
+      },
+    });
     map.addSource("lines", {
       type: "geojson",
       data: {
@@ -388,8 +459,7 @@ async function main() {
     });
     const empty = { type: "FeatureCollection" as const, features: [] };
     map.addSource("trains", { type: "geojson", data: empty });
-    map.addSource("train-bodies", { type: "geojson", data: empty });
-    map.addSource("train-heads", { type: "geojson", data: empty });
+    map.addSource("train-3d", { type: "geojson", data: empty });
 
     map.addLayer({
       id: "lines",
@@ -437,47 +507,26 @@ async function main() {
       paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 9, 15, 22, 17, 44],
         "circle-color": ["get", "color"],
-        "circle-opacity": 0.25,
+        // Gone once the selected train is drawn as a model.
+        "circle-opacity": ["interpolate", ["linear"], ["zoom"], 15, 0.25, 15.8, 0],
         "circle-stroke-color": ["get", "color"],
+        "circle-stroke-opacity": ["interpolate", ["linear"], ["zoom"], 15, 1, 15.8, 0],
         "circle-stroke-width": 1.5,
       },
     });
-    // From BODY_ZOOM up, trains are drawn to scale along the track; the dot
-    // fades out but stays as the click target and label anchor.
-    const bodyOpacity = ["case", ["get", "est"], 0.4, 1] as maplibregl.ExpressionSpecification;
+    // From BODY_ZOOM up, trains are 3D boxes to scale along the track (the
+    // selected one a detailed model); the dot fades out but stays as the
+    // click target and label anchor.
     map.addLayer({
-      id: "train-casing",
-      type: "line",
-      source: "train-bodies",
+      id: "train-3d",
+      type: "fill-extrusion",
+      source: "train-3d",
       minzoom: BODY_ZOOM,
-      layout: { "line-cap": "round", "line-join": "round" },
       paint: {
-        "line-color": "#ffffff",
-        "line-opacity": bodyOpacity,
-        "line-width": ["interpolate", ["linear"], ["zoom"], BODY_ZOOM, 6.5, 15, 10, 17, 17],
-      },
-    });
-    map.addLayer({
-      id: "train-body",
-      type: "line",
-      source: "train-bodies",
-      minzoom: BODY_ZOOM,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": ["get", "color"],
-        "line-opacity": bodyOpacity,
-        "line-width": ["interpolate", ["linear"], ["zoom"], BODY_ZOOM, 4.5, 15, 7.5, 17, 14],
-      },
-    });
-    map.addLayer({
-      id: "train-head",
-      type: "circle",
-      source: "train-heads",
-      minzoom: 13.5,
-      paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 13.5, 1.4, 15, 2.2, 17, 4],
-        "circle-color": ["get", "text"],
-        "circle-opacity": ["case", ["get", "est"], 0.4, 0.95],
+        "fill-extrusion-color": ["get", "color"],
+        "fill-extrusion-height": ["get", "top"],
+        "fill-extrusion-base": ["get", "base"],
+        "fill-extrusion-opacity": 1,
       },
     });
     const dotOpacity = (est: number, full: number) =>
@@ -510,7 +559,7 @@ async function main() {
       paint: { "text-color": ["get", "text"] },
     });
 
-    for (const layer of ["trains", "train-body", "stations", "lines"]) {
+    for (const layer of ["trains", "train-3d", "stations", "lines"]) {
       map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
     }
@@ -520,9 +569,9 @@ async function main() {
         [e.point.x - r, e.point.y - r],
         [e.point.x + r, e.point.y + r],
       ];
-      const feats = map.queryRenderedFeatures(box, { layers: ["trains", "train-body", "stations", "lines"] });
+      const feats = map.queryRenderedFeatures(box, { layers: ["trains", "train-3d", "stations", "lines"] });
       const pick = (...ids: string[]) => feats.find((f: MapGeoJSONFeature) => ids.includes(f.layer.id));
-      const train = pick("trains", "train-body");
+      const train = pick("trains", "train-3d");
       const station = pick("stations");
       const line = pick("lines");
       if (train) select({ kind: "train", id: train.properties.id });
@@ -570,12 +619,37 @@ async function main() {
     }
     selection = s;
     follow = false;
+    // The fly-in to a train leaves room for the panel; give it back when nothing is open.
+    const pad = map.getPadding();
+    if (s?.kind !== "train" && (pad.right || pad.bottom || pad.top)) {
+      map.easeTo({ padding: { top: 0, bottom: 0, left: 0, right: 0 }, duration: 400 });
+    }
     if (s?.kind === "station") {
       const st = stations[s.index];
       map.easeTo({ center: [st.lon, st.lat], duration: 500 });
     }
+    if (s?.kind === "train") flyToTrain(s.id);
     renderInfo(true);
     dirty = true;
+  }
+
+  /** Brings the camera down next to a train, seen from the side. */
+  function flyToTrain(id: string) {
+    const r = running().find((x) => x.id === id);
+    if (!r) return;
+    const [lon, lat, heading] = pointAt(shapes[r.pattern.shape], r.dist);
+    const padding = mobile()
+      ? { top: 140, bottom: Math.round(window.innerHeight * 0.46), left: 0, right: 0 }
+      : { top: 0, bottom: 0, left: 0, right: 380 };
+    map.flyTo({
+      center: [lon, lat],
+      zoom: Math.max(map.getZoom(), ZOOM_TRAIN),
+      pitch: PITCH_TRAIN,
+      bearing: heading - 65,
+      padding,
+      duration: 1600,
+      essential: true,
+    });
   }
 
   // Only touch the DOM when the content changes: rebuilding rows under the
@@ -761,42 +835,47 @@ async function main() {
   let lastFrame = performance.now();
   let lastPush = 0;
   let bodiesShown = false;
+  let buildingsXray = false;
 
   function draw() {
     const all = running();
     const visible = focus === null ? all : all.filter((r) => r.line === focus);
     const selected = selection?.kind === "train" ? selection.id : null;
-    const withBodies = map.getZoom() >= BODY_ZOOM;
+    const zoom = map.getZoom();
+    const withBodies = zoom >= BODY_ZOOM;
     const points = [];
-    const bodies = [];
-    const heads = [];
-    let followed: [number, number] | null = null;
+    const parts: PartFeature[] = [];
+    let followed: [number, number, number] | null = null;
     for (const r of visible) {
       const shape = shapes[r.pattern.shape];
-      const [lon, lat] = pointAt(shape, r.dist);
+      const [lon, lat, heading] = pointAt(shape, r.dist);
       const line = lines[r.line];
-      const properties = { id: r.id, color: line.color, text: line.text, label: line.id, est: r.est, sel: r.id === selected };
+      const sel = r.id === selected;
+      const properties = { id: r.id, color: line.color, text: line.text, label: line.id, est: r.est, sel };
       points.push({ type: "Feature" as const, properties, geometry: { type: "Point" as const, coordinates: [lon, lat] } });
-      if (r.id === selected) followed = [lon, lat];
-      if (withBodies) {
-        const half = (TRAIN_LENGTH[line.id] ?? DEFAULT_TRAIN_LENGTH) / 2;
-        bodies.push({
-          type: "Feature" as const,
-          properties,
-          geometry: { type: "LineString" as const, coordinates: sliceAlong(shape, r.dist - half, r.dist + half) },
-        });
-        const head = pointAt(shape, r.dist + half - 6);
-        heads.push({ type: "Feature" as const, properties, geometry: { type: "Point" as const, coordinates: [head[0], head[1]] } });
+      if (sel) followed = [lon, lat, heading];
+      if (!withBodies) continue;
+      const length = TRAIN_LENGTH[line.id] ?? DEFAULT_TRAIN_LENGTH;
+      if (sel && zoom >= MODEL_ZOOM) trainModel(parts, shape, r.dist, length, zoom, line.color, r.id);
+      else {
+        // Timetable stand-ins (live mode, line missing from the feed) fade into the background.
+        const color = r.est ? mix(line.color, BACKGROUND, 0.6) : line.color;
+        const front = r.est ? mix(line.text, BACKGROUND, 0.6) : line.text;
+        trainBox(parts, shape, r.dist, length, zoom, color, front, r.id);
       }
     }
     (map.getSource("trains") as GeoJSONSource).setData({ type: "FeatureCollection", features: points });
     if (withBodies || bodiesShown) {
-      (map.getSource("train-bodies") as GeoJSONSource).setData({ type: "FeatureCollection", features: bodies });
-      (map.getSource("train-heads") as GeoJSONSource).setData({ type: "FeatureCollection", features: heads });
+      (map.getSource("train-3d") as GeoJSONSource).setData({ type: "FeatureCollection", features: parts });
       bodiesShown = withBodies;
     }
+    const xray = selected !== null;
+    if (xray !== buildingsXray) {
+      buildingsXray = xray;
+      map.setPaintProperty("buildings-3d", "fill-extrusion-opacity", xray ? BUILDINGS_OPACITY_TRAIN : BUILDINGS_OPACITY);
+    }
     count.textContent = String(visible.length);
-    if (follow && followed) map.setCenter(followed);
+    if (follow && followed && !map.isMoving()) map.jumpTo({ center: [followed[0], followed[1]] });
     if (focus !== null && !selection) lineView.update(visible, selected);
     renderInfo();
   }
@@ -833,7 +912,8 @@ async function main() {
 
     // At low speed trains move under a pixel per frame: refresh positions less
     // often to spare the CPU (matters for long live sessions on laptops/phones).
-    const minInterval = live || speed === 1 ? 100 : speed <= 10 ? 33 : 0;
+    const minInterval = follow ? 0 : live || speed === 1 ? 100 : speed <= 10 ? 33 : 0;
+    if (follow) dirty = true;
     if (dirty && ready && now - lastPush >= minInterval) {
       lastPush = now;
       dirty = false;
@@ -855,7 +935,10 @@ async function main() {
   const lineParam = params.get("line")?.toUpperCase().replace("BIS", "B");
   const lineIndex = lines.findIndex((l) => l.id === lineParam);
   if (lineIndex >= 0) map.once("load", () => setFocus(lineIndex));
-  if (params.has("live")) {
+  // With a relay, real time needs nothing from the visitor: open in live mode
+  // unless the link asks for a given moment.
+  const pinned = ["date", "time", "speed", "paused"].some((k) => params.has(k));
+  if (params.has("live") || (feed.relay && !pinned)) {
     if (feed.configured) enterLive();
     else openKeyDialog();
   }

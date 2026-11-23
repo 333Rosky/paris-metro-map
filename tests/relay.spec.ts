@@ -139,7 +139,7 @@ test("the relay's line list is the network's metro lines", () => {
   expect([...METRO_LINES].sort()).toEqual(network.lines.map((l: any) => l.ref).sort());
 });
 
-test("with a relay, Direct is real time for every visitor, with no key asked or sent", async ({ page }, info) => {
+test("with a relay, the site opens in Direct: real time for every visitor, with no key asked or sent", async ({ page }, info) => {
   test.slow(); // live mode keeps rendering; screenshots are slow under software WebGL
   await page.clock.setFixedTime(capturedAt);
   // A key saved in this browser before the relay existed must stay in the browser.
@@ -155,7 +155,8 @@ test("with a relay, Direct is real time for every visitor, with no key asked or 
     return route.abort();
   });
 
-  await page.goto(SITE + "?live");
+  // No ?live: a plain visit starts in live mode.
+  await page.goto(SITE);
   await page.waitForFunction(() => (window as any).metro?.state.realtime, null, { timeout: 15_000 });
   await expect(page.locator("#key-dialog")).toBeHidden();
   await expect(page.locator("#live")).toHaveAttribute("data-state", "ok");
@@ -187,6 +188,14 @@ test("with a relay, Direct is real time for every visitor, with no key asked or 
   await expect(page.locator("#key-dialog")).toBeHidden();
   expect(await page.evaluate(() => (window as any).metro.state.live)).toBe(true);
   await page.screenshot({ path: info.outputPath("relay-live.png") });
+});
+
+test("with a relay, a link to a given moment stays on the timetable", async ({ page }) => {
+  await page.goto(SITE + "?time=08:30&paused");
+  await page.waitForFunction(() => (window as any).metro?.state.ready);
+  const s = await page.evaluate(() => (window as any).metro.state);
+  expect(s.live).toBe(false);
+  expect(s.playing).toBe(false);
 });
 
 test("a single refused request is retried quietly", async ({ page }) => {

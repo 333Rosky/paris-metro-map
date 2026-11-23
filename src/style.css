@@ -784,3 +784,10 @@ dialog#key-dialog::backdrop {
 .board tbody tr:not([data-trip]) {
   cursor: default;
 }
+
+/* 2D / 3D switch, in the map control stack. */
+.maplibregl-ctrl-group button.view-3d {
+  font: 700 11px/1 system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  color: #222;
+}

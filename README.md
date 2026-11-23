@@ -4,9 +4,10 @@ Carte animée de toutes les rames du métro parisien (lignes 1 à 14, 3bis et 7b
 
 ![Le réseau à 8 h 30 un mardi : 560 rames en circulation](docs/screenshot.png)
 
-- **Toutes les rames** positionnées sur le tracé réel des lignes, avec accélération au départ et freinage à l'approche des stations. En zoomant, chaque rame est dessinée à l'échelle (75 m, 90 m sur les lignes 1 et 4, 120 m sur la 14) et épouse les courbes de la voie.
+- **Toutes les rames** positionnées sur le tracé réel des lignes, avec accélération au départ et freinage à l'approche des stations. En zoomant, chaque rame devient un volume à l'échelle (75 m, 90 m sur les lignes 1 et 4, 120 m sur la 14) qui épouse les courbes de la voie.
+- **La 3D** : la carte est inclinée, avec les bâtiments en volume ; le bouton « 2D » la remet à plat. Un clic sur une rame amène la caméra à côté d'elle et la dessine en détail (voitures, vitres, bandeau à la couleur de la ligne, feux) ; les bâtiments s'effacent alors pour laisser voir la rame, qui roule sous eux.
 - **Le temps** : lecture, pause, vitesses ×1 à ×300, curseur sur la journée, choix du jour.
-- **Le direct** : le bouton « Direct » cale la carte sur l'heure de Paris et place les rames d'après les prochains passages annoncés en temps réel, via un relais ou avec une clé API PRIM personnelle.
+- **Le direct** : le site s'ouvre en direct quand un relais est configuré (c'est le cas du site publié) ; le bouton « Direct » cale la carte sur l'heure de Paris et place les rames d'après les prochains passages annoncés en temps réel, via un relais ou avec une clé API PRIM personnelle.
 - **Les lignes** : un clic sur une pastille ou sur un tracé isole la ligne et ouvre son schéma, avec ses stations, ses branches et toutes ses rames en mouvement dans les deux sens.
 - **Les stations** : un clic affiche les prochains passages avec heure d'arrivée, heure de départ et direction.
 - **Les rames** : un clic affiche la mission (arrêt en cours, arrêts à venir, horaires) ; « Suivre » garde la rame au centre.
@@ -33,7 +34,7 @@ PRIM exige une clé, limitée à 1 000 requêtes par jour, et sa réponse couvre
 
 ### Avec un relais : aucun visiteur n'a besoin de clé
 
-Le site publié lit un relais : « Direct » y fonctionne sans clé.
+Le site publié lit un relais : il s'ouvre en direct, sans clé.
 
 Le relais (`relay/`) garde la clé côté serveur et sert à tous les visiteurs la partie métro du flux :
 
@@ -96,7 +97,7 @@ python3 scripts/build_data.py --gtfs chemin/vers/IDFM-gtfs.zip
 
 ### Lien direct vers un instant
 
-`?date=20261124&time=08:30&speed=60&paused` fixe le jour, l'heure, la vitesse et met en pause. `?line=4` ouvre une ligne (`3bis`, `7bis` acceptés), `?live` démarre en direct. La position de la carte est conservée dans le fragment d'URL (`#zoom/lat/lon`).
+`?date=20261124&time=08:30&speed=60&paused` fixe le jour, l'heure, la vitesse et met en pause. `?line=4` ouvre une ligne (`3bis`, `7bis` acceptés), `?live` démarre en direct ; avec un relais, c'est le comportement par défaut, sauf si le lien fixe un instant (`date`, `time`, `speed` ou `paused`). La position de la carte est conservée dans le fragment d'URL (`#zoom/lat/lon`).
 
 ## Fonctionnement
 
@@ -109,7 +110,8 @@ IDFM GTFS (zip) ──► scripts/build_data.py ──► public/data/network.js
                          src/realtime.ts   rames reconstruites depuis le flux PRIM (siri.ts, rt-worker.ts)
                          relay/            relais du flux PRIM : clé côté serveur, partie métro uniquement
                          src/lineview.ts   schéma d'une ligne et de ses rames
-                         src/geo.ts        position le long du tracé
+                         src/geo.ts        position le long du tracé, emprise d'une rame
+                         src/train3d.ts    rames en volume (boîtes, modèle détaillé de la rame choisie)
                          src/main.ts       carte MapLibre, animation, interface
 ```
 

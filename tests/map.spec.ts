@@ -150,28 +150,47 @@ test("a branched line is laid out with its branches side by side @mobile", async
   await page.locator("#info").screenshot({ path: info.outputPath("line-13.png") });
 });
 
-test("zoomed in, trains are drawn to scale along the track", async ({ page }, info) => {
+test("zoomed in, trains are 3D boxes drawn to scale along the track", async ({ page }, info) => {
   const date = await pickWeekday(page);
-  await open(page, `date=${date}&time=08:30&paused#15.2/48.8584/2.3470`);
+  await open(page, `date=${date}&time=08:30&paused#15.2/48.8584/2.3470/-30/60`);
   await page.waitForTimeout(500);
   const bodies = await page.evaluate(() => {
     const m = (window as any).metro.map;
-    const feats = m.getSource("train-bodies").serialize().data.features;
+    const feats = m.getSource("train-3d").serialize().data.features;
     const points = m.getSource("trains").serialize().data.features;
     const R = 6371000;
-    const length = (c: number[][]) =>
-      c.slice(1).reduce((sum, p, i) => {
-        const dx = ((p[0] - c[i][0]) * Math.PI) / 180 * Math.cos((48.86 * Math.PI) / 180) * R;
-        const dy = ((p[1] - c[i][1]) * Math.PI) / 180 * R;
-        return sum + Math.hypot(dx, dy);
-      }, 0);
+    const dist = (p: number[], q: number[]) =>
+      Math.hypot(((q[0] - p[0]) * Math.PI) / 180 * Math.cos((48.86 * Math.PI) / 180) * R, ((q[1] - p[1]) * Math.PI) / 180 * R);
+    // Each box is a ribbon along the track: perimeter = 2 × length + 2 × width.
+    const byId = new Map<string, { label: string; perimeter: number; width: number; parts: number; top: number }>();
+    for (const f of feats) {
+      const ring = f.geometry.coordinates[0];
+      const perimeter = ring.slice(1).reduce((s: number, p: number[], i: number) => s + dist(ring[i], p), 0);
+      const width = dist(ring[0], ring[ring.length - 2]);
+      const e = byId.get(f.properties.id) ?? { label: "", perimeter: 0, width, parts: 0, top: f.properties.top };
+      e.perimeter += perimeter;
+      e.parts++;
+      byId.set(f.properties.id, e);
+    }
+    const label = new Map(points.map((p: any) => [p.properties.id, p.properties.label]));
     const byLine: Record<string, number[]> = {};
-    for (const f of feats) (byLine[f.properties.label] ??= []).push(length(f.geometry.coordinates));
+    for (const [id, e] of byId) (byLine[label.get(id) as string] ??= []).push(e.perimeter / 2 - e.parts * e.width);
     const median = (a: number[]) => a.sort((x, y) => x - y)[a.length >> 1];
-    return { n: feats.length, points: points.length, l1: median(byLine["1"]), l14: median(byLine["14"]), l7: median(byLine["7"]) };
+    const any = [...byId.values()][0];
+    return {
+      n: byId.size,
+      points: points.length,
+      parts: any.parts,
+      height: any.top,
+      l1: median(byLine["1"]),
+      l14: median(byLine["14"]),
+      l7: median(byLine["7"]),
+    };
   });
   expect(bodies.n).toBe(bodies.points);
   expect(bodies.n).toBeGreaterThan(400);
+  expect(bodies.parts).toBe(2); // body and front end
+  expect(bodies.height).toBeGreaterThan(0);
   // 6-car, 8-car and 5-car trains.
   expect(bodies.l1).toBeGreaterThan(85);
   expect(bodies.l1).toBeLessThan(95);
@@ -181,6 +200,40 @@ test("zoomed in, trains are drawn to scale along the track", async ({ page }, in
   expect(bodies.l7).toBeLessThan(79);
   await page.waitForTimeout(2500);
   await page.screenshot({ path: info.outputPath("train-bodies.png") });
+});
+
+test("the map is tilted in 3D, can go flat, and a clicked train flies in as a detailed model", async ({ page }, info) => {
+  test.slow(); // 3D under software WebGL
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:30&paused`);
+  const m = () => page.evaluate(() => ({ pitch: (window as any).metro.map.getPitch(), zoom: (window as any).metro.map.getZoom() }));
+  expect((await m()).pitch).toBeGreaterThan(30);
+  await expect(page.locator("#view-3d")).toHaveText("2D");
+  await page.locator("#view-3d").click();
+  await expect.poll(async () => (await m()).pitch).toBeLessThan(1);
+  await expect(page.locator("#view-3d")).toHaveText("3D");
+  await page.locator("#view-3d").click();
+  await expect.poll(async () => (await m()).pitch).toBeGreaterThan(30);
+
+  const id = await page.evaluate(() => {
+    const metro = (window as any).metro;
+    const r = metro.running().find((x: any) => x.pattern.line === metro.running()[0].pattern.line);
+    metro.select({ kind: "train", id: r.id });
+    return r.id;
+  });
+  await expect.poll(async () => (await m()).zoom, { timeout: 10_000 }).toBeGreaterThan(18);
+  expect((await m()).pitch).toBeGreaterThan(55);
+  await page.waitForTimeout(500);
+  const model = await page.evaluate((id) => {
+    const feats = (window as any).metro.map.getSource("train-3d").serialize().data.features;
+    const mine = feats.filter((f: any) => f.properties.id === id);
+    return { parts: mine.length, floating: mine.filter((f: any) => f.properties.base > 0).length };
+  }, id);
+  // Cars, windows, stripe, roof, cab lights: far more than the two parts of a box.
+  expect(model.parts).toBeGreaterThan(30);
+  expect(model.floating).toBeGreaterThan(20);
+  await page.waitForTimeout(2000);
+  await page.screenshot({ path: info.outputPath("train-3d.png") });
 });
 
 test("late evening runs continue past midnight on the next day @mobile", async ({ page }, info) => {
