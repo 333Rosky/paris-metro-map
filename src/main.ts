@@ -7,7 +7,9 @@ import { measure, pointAt, type MeasuredShape } from "./geo";
 import { LineView } from "./lineview";
 import { PRIM_URL, RealtimeFeed, loadKey, rtState, saveKey, type RtTrain } from "./realtime";
 import { DAY, Schedule, shiftDate } from "./schedule";
-import { MODEL_ZOOM, mix, trainBox, trainModel, type PartFeature } from "./train3d";
+import { STOCK, stockLength } from "./stock";
+import { MODEL_ZOOM, mix, trainBox, trainFootprint, trainModel, type PartFeature } from "./train3d";
+import type { TrainMeshLayer } from "./train-mesh";
 import type { Line, Network, Pattern, Timetable } from "./types";
 
 // MapLibre 6 resolves its worker at runtime; let Vite emit it as an asset.
@@ -331,6 +333,8 @@ async function main() {
     bearing: -12,
     maxPitch: 78,
     hash: true,
+    // Smooth edges for the train meshes and the extrusions.
+    canvasContextAttributes: { antialias: true },
     attributionControl: {
       compact: true,
       customAttribution:
@@ -828,6 +832,24 @@ async function main() {
     }
   });
 
+  // Real rolling stock (stock.ts): the mesh code and three.js are fetched on
+  // the first click on a train that has one. Until it is there, or if it
+  // cannot be loaded, the train keeps its extruded model.
+  let meshLayer: TrainMeshLayer | null = null;
+  let meshRequested = false;
+  function loadMesh() {
+    if (meshRequested) return;
+    meshRequested = true;
+    import("./train-mesh")
+      .then(({ TrainMeshLayer }) => {
+        const layer = new TrainMeshLayer();
+        map.addLayer(layer, "trains");
+        meshLayer = layer;
+        dirty = true;
+      })
+      .catch((err) => console.warn("Modèle 3D indisponible :", err));
+  }
+
   // Animation ----------------------------------------------------------------
   const clock = $("clock");
   const count = $("count");
@@ -846,17 +868,27 @@ async function main() {
     const points = [];
     const parts: PartFeature[] = [];
     let followed: [number, number, number] | null = null;
+    let meshed = false;
     for (const r of visible) {
       const shape = shapes[r.pattern.shape];
       const [lon, lat, heading] = pointAt(shape, r.dist);
       const line = lines[r.line];
       const sel = r.id === selected;
-      const properties = { id: r.id, color: line.color, text: line.text, label: line.id, est: r.est, sel };
+      const model = sel && zoom >= MODEL_ZOOM;
+      const stock = model ? STOCK[line.id] : undefined;
+      if (stock && !meshLayer) loadMesh();
+      const mesh = stock && meshLayer ? meshLayer : null;
+      // A mesh carries no line number on its roof.
+      const properties = { id: r.id, color: line.color, text: line.text, label: mesh ? "" : line.id, est: r.est, sel };
       points.push({ type: "Feature" as const, properties, geometry: { type: "Point" as const, coordinates: [lon, lat] } });
       if (sel) followed = [lon, lat, heading];
       if (!withBodies) continue;
       const length = TRAIN_LENGTH[line.id] ?? DEFAULT_TRAIN_LENGTH;
-      if (sel && zoom >= MODEL_ZOOM) trainModel(parts, shape, r.dist, length, zoom, line.color, r.id);
+      if (mesh && stock) {
+        mesh.show(r.id, stock, shape, r.dist, zoom);
+        trainFootprint(parts, shape, r.dist, stockLength(stock), zoom, r.id);
+        meshed = true;
+      } else if (model) trainModel(parts, shape, r.dist, length, zoom, line.color, r.id);
       else {
         // Timetable stand-ins (live mode, line missing from the feed) fade into the background.
         const color = r.est ? mix(line.color, BACKGROUND, 0.6) : line.color;
@@ -864,6 +896,7 @@ async function main() {
         trainBox(parts, shape, r.dist, length, zoom, color, front, r.id);
       }
     }
+    if (!meshed) meshLayer?.hide();
     (map.getSource("trains") as GeoJSONSource).setData({ type: "FeatureCollection", features: points });
     if (withBodies || bodiesShown) {
       (map.getSource("train-3d") as GeoJSONSource).setData({ type: "FeatureCollection", features: parts });
@@ -952,8 +985,15 @@ async function main() {
       select,
       focus: setFocus,
       running,
+      /** Where a running train is, `offset` metres ahead of its middle along the track. */
+      trainPosition(id: string, offset = 0): [number, number] | null {
+        const r = running().find((x) => x.id === id);
+        if (!r) return null;
+        const [lon, lat] = pointAt(shapes[r.pattern.shape], r.dist + offset);
+        return [lon, lat];
+      },
       get state() {
-        return { date, t, playing, speed, focus, selection, ready, live, realtime: realtime() };
+        return { date, t, playing, speed, focus, selection, ready, live, realtime: realtime(), mesh: meshLayer?.shown ?? null };
       },
     },
   });

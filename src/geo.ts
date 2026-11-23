@@ -39,6 +39,19 @@ export function pointAt(shape: MeasuredShape, d: number): [number, number, numbe
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, bearing(a, b)];
 }
 
+/**
+ * Like pointAt, but carries straight on past either end of the shape: a train
+ * standing at a terminus overhangs the end of its run.
+ */
+export function pointBeyond(shape: MeasuredShape, d: number): [number, number] {
+  const total = shape.cum[shape.cum.length - 1];
+  const [lon, lat, heading] = pointAt(shape, d);
+  const over = d < 0 ? d : d > total ? d - total : 0;
+  if (over === 0) return [lon, lat];
+  const rad = (heading * Math.PI) / 180;
+  return [lon + (Math.sin(rad) * over) / M_PER_DEG_LON, lat + (Math.cos(rad) * over) / M_PER_DEG_LAT];
+}
+
 function bearing(a: [number, number], b: [number, number]): number {
   const dx = (b[0] - a[0]) * M_PER_DEG_LON;
   const dy = (b[1] - a[1]) * M_PER_DEG_LAT;

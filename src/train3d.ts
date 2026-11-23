@@ -90,6 +90,15 @@ export function trainBox(
   part(out, shape, head - nose, head, width / 2, 0, height, front, id);
 }
 
+/**
+ * What stays on the ground under a train drawn as a mesh (train-mesh.ts): a
+ * dark footprint that reads as its shadow and keeps the train clickable.
+ */
+export function trainFootprint(out: PartFeature[], shape: MeasuredShape, dist: number, length: number, zoom: number, id: string) {
+  const k = Math.max(1, (8 * metresPerPixel(zoom)) / REAL_WIDTH);
+  part(out, shape, dist - length / 2 - 0.4, dist + length / 2 + 0.4, 1.5 * k, 0, 0.03, "#0b0c10", id);
+}
+
 /** The selected train up close: one model per car, front car at `dist + length / 2`. */
 export function trainModel(
   out: PartFeature[],

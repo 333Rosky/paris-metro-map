@@ -56,10 +56,20 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - 3D: map tilted (pitch 50, maxPitch 78), sky, OpenMapTiles buildings as fill-extrusion (render_height), 2D/3D button. Trains are fill-extrusion boxes along the track (width kept at a few px, length to scale, front end in the line's text colour). The selected train, from zoom 15.8, is a detailed model (cars, windows, livery stripe, roof, cab lights; real scale at zoom ≥ 18). Click flies the camera beside it (zoom 18.3, pitch 62).
 - Found: MapLibre depth-tests all extrusions together, so buildings hid the train (the line runs under them). With a train open, buildings fade to opacity 0 between zoom 15.2 and 16.2 (MapLibre skips a layer at 0, depth included).
 - Following now redraws every frame (was 10 fps in live mode) and pauses while the camera is moving.
-- Not done: terrain relief, a real 3D mesh (three.js) for rolling-stock types per line.
+- Not done: terrain relief. Real meshes per rolling stock: started below.
+
+## Real rolling stock (2026-11-23)
+- User request: "quand je dis 3D je pense qu'on peut faire les vrais trains en cliquant dessus et en le modélisant", then "Oui, la 14 d'abord": line 14 first, so the user can judge the look before the other lines.
+- `src/stock.ts` says which line has a modelled stock (so far `"14"`: MP 14, 8 cars of 15.04 m). `src/train-mesh.ts` draws it: a three.js scene in the map's WebGL context (MapLibre custom layer, `renderingMode: "3d"`), fetched on the first click on such a train (separate chunk, 135 KB gzip); the extruded model stays as the stand-in while it loads or if it fails, and for every other line.
+- The model is built in code, no asset: body lofted from a cross-section, livery and lit windows painted on canvases (side and front textures plus emissive maps), bogies on tyres, gangways, white LED frame at the head and red at the tail. Each car sits on its two bogie points along the track, so the train bends with the line; past the end of a shape it carries straight on (`pointBeyond`).
+- Sourced (Wikipedia fr/en, read 2026-11-23): car length 15.04 m, width 2.45 m, 3 two-leaf doors a side, open gangways, white livery with silver band, sky-blue line along the roof and at the doors, flat front with LED strip. Not sourced, estimated: height (3.5 m), door width (1.65 m), window layout, roof units.
+- Limit: the PRIM feed names no trainset or stock type (`VehicleFeatureRef` and `VehicleJourneyName` empty on the 624 metro journeys of the 22 Nov capture), so a train gets the stock of its line; on a line with several stocks it will be one of them.
+- The map context now has antialiasing on (`canvasContextAttributes.antialias`), for the mesh edges. Under the mesh a flat dark footprint stays in `train-3d`: shadow and click target.
+- Found while testing: three's hemisphere light points to +y by default; the scene's up is z. The roof came out grey until its position was set to (0, 0, 1).
+- Not done: other stocks (MP 89, MP 05, MF 67, MF 77, MF 88, MF 01, MF 19; check the fleet per line on a current source first), MP 14 of lines 4 and 11 (6 and 5 cars; line 11 has a driver's cab), WebGL context loss in the mesh layer, a check on a phone.
 
 ## Status
-- 27 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM.
+- 28 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM, the MP 14 mesh.
 
 ## Next
 - Later: RER/tram; PRIM disruptions on the line view.

@@ -217,7 +217,9 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
 
   const id = await page.evaluate(() => {
     const metro = (window as any).metro;
-    const r = metro.running().find((x: any) => x.pattern.line === metro.running()[0].pattern.line);
+    // Line 7 has no rolling-stock mesh: its trains keep the extruded model.
+    const line = metro.schedule.network.lines.findIndex((l: any) => l.id === "7");
+    const r = metro.running().find((x: any) => x.line === line);
     metro.select({ kind: "train", id: r.id });
     return r.id;
   });
@@ -232,8 +234,100 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
   // Cars, windows, stripe, roof, cab lights: far more than the two parts of a box.
   expect(model.parts).toBeGreaterThan(30);
   expect(model.floating).toBeGreaterThan(20);
+  expect(await page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
   await page.waitForTimeout(2000);
   await page.screenshot({ path: info.outputPath("train-3d.png") });
+});
+
+// Real rolling stock. Expected, for a line whose stock is modelled (line 14, MP 14):
+// - the mesh code is fetched on the first such click, not with the page;
+// - the selected train becomes a mesh of 8 cars of 15.04 m, and its extruded
+//   model goes away, leaving one flat part on the ground (shadow, click target);
+// - the mesh is really drawn where the train is: its white body shows on the
+//   dark map, far more than the white front end of the box it replaces;
+// - clicking the mesh keeps the train selected; closing the panel removes it.
+// Failure modes covered: mesh never loads (state.mesh stays null), mesh drawn
+// off-screen or culled (no white pixels), mesh left behind after deselection.
+test("a line 14 train opens as a real MP 14: eight cars, drawn as a mesh", async ({ page }, info) => {
+  test.slow(); // 3D under software WebGL
+  const requested: string[] = [];
+  page.on("request", (r) => requested.push(r.url()));
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:30&paused`);
+  const meshChunk = () => requested.filter((u) => /train-mesh[^/]*\.js/.test(u)).length;
+  expect(meshChunk(), "three.js is not loaded with the page").toBe(0);
+
+  // Light pixels (the white MP 14) on the map canvas, in a box around the train.
+  const white = (id: string) =>
+    page.evaluate(
+      (id) =>
+        new Promise<number>((resolve) => {
+          const metro = (window as any).metro;
+          const map = metro.map;
+          map.once("render", () => {
+            const r = metro.running().find((x: any) => x.id === id);
+            const canvas = map.getCanvas() as HTMLCanvasElement;
+            const gl = canvas.getContext("webgl2")!;
+            const k = canvas.width / canvas.clientWidth;
+            const c = map.project(metro.trainPosition(r.id));
+            const half = 320;
+            const x = Math.max(0, Math.round((c.x - half) * k));
+            const y = Math.max(0, Math.round((canvas.clientHeight - c.y - half) * k));
+            const w = Math.min(canvas.width - x, Math.round(2 * half * k));
+            const h = Math.min(canvas.height - y, Math.round(2 * half * k));
+            const px = new Uint8Array(w * h * 4);
+            gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            let n = 0;
+            for (let i = 0; i < px.length; i += 4) if (px[i] > 150 && px[i + 1] > 150 && px[i + 2] > 150) n++;
+            resolve(n);
+          });
+          map.triggerRepaint();
+        }),
+      id,
+    );
+
+  const id = await page.evaluate(() => {
+    const metro = (window as any).metro;
+    const line = metro.schedule.network.lines.findIndex((l: any) => l.id === "14");
+    // A train in the middle of the line: all eight cars are on the track.
+    const trains = metro.running().filter((x: any) => x.line === line).sort((a: any, b: any) => a.dist - b.dist);
+    const r = trains[Math.floor(trains.length / 2)];
+    metro.select({ kind: "train", id: r.id });
+    return r.id;
+  });
+  const zoom = () => page.evaluate(() => (window as any).metro.map.getZoom());
+  await expect.poll(zoom, { timeout: 10_000 }).toBeGreaterThan(18);
+  await expect
+    .poll(() => page.evaluate(() => (window as any).metro.state.mesh), { timeout: 20_000 })
+    .toEqual({ id, stock: "MP 14", cars: 8, length: 120.32 });
+  expect(meshChunk(), "the mesh code came with the click").toBeGreaterThan(0);
+
+  const parts = () =>
+    page.evaluate((id) => {
+      const feats = (window as any).metro.map.getSource("train-3d").serialize().data.features;
+      return feats.filter((f: any) => f.properties.id === id).length;
+    }, id);
+  await expect.poll(parts).toBe(1);
+  await page.waitForFunction(() => !(window as any).metro.map.isMoving());
+  await expect.poll(() => white(id), { timeout: 15_000 }).toBeGreaterThan(5000);
+  const drawn = await white(id);
+  await page.waitForTimeout(2000);
+  await page.screenshot({ path: info.outputPath("train-mp14.png") });
+
+  // A click on a car away from the middle of the train keeps it selected.
+  const spot = await page.evaluate((id) => {
+    const metro = (window as any).metro;
+    const p = metro.map.project(metro.trainPosition(id, 40));
+    return { x: p.x, y: p.y };
+  }, id);
+  await page.mouse.click(spot.x, spot.y);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as any).metro.state.selection)).toEqual({ kind: "train", id });
+
+  await page.locator("#close").click();
+  await expect.poll(() => page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
+  // Back to a box: only its front end is white (line 14 writes in white).
+  await expect.poll(() => white(id)).toBeLessThan(drawn / 5);
 });
 
 test("late evening runs continue past midnight on the next day @mobile", async ({ page }, info) => {
