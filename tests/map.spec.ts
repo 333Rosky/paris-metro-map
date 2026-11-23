@@ -225,15 +225,17 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
   });
   await expect.poll(async () => (await m()).zoom, { timeout: 10_000 }).toBeGreaterThan(18);
   expect((await m()).pitch).toBeGreaterThan(55);
-  await page.waitForTimeout(500);
-  const model = await page.evaluate((id) => {
-    const feats = (window as any).metro.map.getSource("train-3d").serialize().data.features;
-    const mine = feats.filter((f: any) => f.properties.id === id);
-    return { parts: mine.length, floating: mine.filter((f: any) => f.properties.base > 0).length };
-  }, id);
+  const model = () =>
+    page.evaluate((id) => {
+      const feats = (window as any).metro.map.getSource("train-3d").serialize().data.features;
+      const mine = feats.filter((f: any) => f.properties.id === id);
+      return { parts: mine.length, floating: mine.filter((f: any) => f.properties.base > 0).length };
+    }, id);
   // Cars, windows, stripe, roof, cab lights: far more than the two parts of a box.
-  expect(model.parts).toBeGreaterThan(30);
-  expect(model.floating).toBeGreaterThan(20);
+  // The model comes with the frame after the camera gets close: under software
+  // WebGL that frame can take over a second.
+  await expect.poll(async () => (await model()).parts, { timeout: 15_000 }).toBeGreaterThan(30);
+  expect((await model()).floating).toBeGreaterThan(20);
   expect(await page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
   await page.waitForTimeout(2000);
   await page.screenshot({ path: info.outputPath("train-3d.png") });
@@ -320,6 +322,18 @@ test("a line 14 train opens as a real MP 14: eight cars, drawn as a mesh", async
     const p = metro.map.project(metro.trainPosition(id, 40));
     return { x: p.x, y: p.y };
   }, id);
+  // The footprint under the mesh is what takes the click: wait until the map has it.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ spot, id }) => {
+          const feats = (window as any).metro.map.queryRenderedFeatures([spot.x, spot.y], { layers: ["train-3d"] });
+          return feats.some((f: any) => f.properties.id === id);
+        },
+        { spot, id },
+      ),
+    )
+    .toBe(true);
   await page.mouse.click(spot.x, spot.y);
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => (window as any).metro.state.selection)).toEqual({ kind: "train", id });
