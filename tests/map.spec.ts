@@ -113,9 +113,10 @@ test("a line badge opens the line view with its trains", async ({ page }, info) 
   await badge.click();
   await expect(badge).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#line-view h2")).toHaveText("Métro 4");
+  // The counter follows on the next drawn frame, which a loaded machine delays.
+  await expect.poll(() => count(page)).toBeLessThan(all);
   const onLine = await count(page);
   expect(onLine).toBeGreaterThan(10);
-  expect(onLine).toBeLessThan(all);
   // Every train of the line is drawn on the schematic, split by direction.
   await expect(page.locator("#line-view .lv-stops text")).toHaveCount(29);
   await expect(page.locator("#line-view .lv-train")).toHaveCount(onLine);
