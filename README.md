@@ -6,7 +6,7 @@ Carte animée de toutes les rames du métro parisien (lignes 1 à 14, 3bis et 7b
 
 - **Toutes les rames** positionnées sur le tracé réel des lignes, avec accélération au départ et freinage à l'approche des stations. En zoomant, chaque rame devient un volume à l'échelle (75 m, 90 m sur les lignes 1 et 4, 120 m sur la 14) qui épouse les courbes de la voie.
 - **La 3D** : la carte est inclinée, avec les bâtiments en volume ; le bouton « 2D » la remet à plat. Un clic sur une rame amène la caméra à côté d'elle et la dessine en détail (voitures, vitres, bandeau à la couleur de la ligne, feux) ; les bâtiments s'effacent alors pour laisser voir la rame, qui roule sous eux.
-- **Le vrai matériel** : sur la ligne 14, la rame ouverte est un MP 14 modélisé (huit voitures de 15,04 m, livrée blanche Île-de-France Mobilités, trois portes par face, intercirculations, face avant plate cernée de son bandeau lumineux). Le flux ne dit pas quelle rame circule : le modèle est celui du matériel de la ligne. Les autres lignes gardent le modèle générique.
+- **Le vrai matériel** : la rame ouverte est dessinée en volume d'après le matériel qui assure l'essentiel du service de sa ligne en novembre 2026 : MP 05 (ligne 1), MF 01 (2, 5, 9), MF 67 (3, 3bis, 10, 12), MP 14 (4, 11, 14), MP 89 CC (6), MF 77 (7, 8, 13), MF 88 (7bis). Longueur, largeur, hauteur, nombre de voitures et de portes, intercirculations, pneus ou roues en fer viennent des fiches de chaque matériel ; les couleurs de livrée sont dessinées d'après leur description. Le flux ne dit pas quelle rame circule : sur une ligne au parc mixte (la 4), le modèle est l'un de ses matériels.
 - **Le temps** : lecture, pause, vitesses ×1 à ×300, curseur sur la journée, choix du jour.
 - **Le direct** : le site s'ouvre en direct quand un relais est configuré (c'est le cas du site publié) ; le bouton « Direct » cale la carte sur l'heure de Paris et place les rames d'après les prochains passages annoncés en temps réel, via un relais ou avec une clé API PRIM personnelle.
 - **Les lignes** : un clic sur une pastille ou sur un tracé isole la ligne et ouvre son schéma, avec ses stations, ses branches et toutes ses rames en mouvement dans les deux sens.
@@ -116,7 +116,7 @@ IDFM GTFS (zip) ──► scripts/build_data.py ──► public/data/network.js
                          src/geo.ts        position le long du tracé, emprise d'une rame
                          src/train3d.ts    rames en volume (boîtes, modèle détaillé de la rame choisie)
                          src/stock.ts      matériel roulant modélisé, par ligne
-                         src/train-mesh.ts maillage three.js du matériel (MP 14), chargé au premier clic
+                         src/train-mesh.ts maillage three.js du matériel de chaque ligne, chargé au premier clic
                          src/main.ts       carte MapLibre, animation, interface
 ```
 

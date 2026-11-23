@@ -66,11 +66,21 @@ Open-source map of every Paris metro train moving over time, with arrivals and d
 - Limit: the PRIM feed names no trainset or stock type (`VehicleFeatureRef` and `VehicleJourneyName` empty on the 624 metro journeys of the 22 Nov capture), so a train gets the stock of its line; on a line with several stocks it will be one of them.
 - The map context now has antialiasing on (`canvasContextAttributes.antialias`), for the mesh edges. Under the mesh a flat dark footprint stays in `train-3d`: shadow and click target.
 - Found while testing: three's hemisphere light points to +y by default; the scene's up is z. The roof came out grey until its position was set to (0, 0, 1).
-- Not done: other stocks (MP 89, MP 05, MF 67, MF 77, MF 88, MF 01, MF 19; check the fleet per line on a current source first), MP 14 of lines 4 and 11 (6 and 5 cars; line 11 has a driver's cab), WebGL context loss in the mesh layer, a check on a phone.
+- Not done (at the time): other stocks, MP 14 of lines 4 and 11.
+
+## Rolling stock on every line (2026-11-23)
+- User request: "faudrait faire ça sur tous les trains en vrai". Ownership of `src/stock.ts` / `src/train-mesh.ts` passed to the "3D map" session (the MP 14 session had closed).
+- Fleet per line checked on fr/en Wikipedia (edited Aug–Nov 2026), Métropolitor, RATP/IDFM press: 1 MP 05 (6), 2/5 MF 01 (5, RATP livery), 9 MF 01 (STIF livery), 3/10/12 MF 67 (5; 3bis 3), 4 MP 14 (6), 6 MP 89 CC (5, last MP 73 ran 8 Jul 2026), 7/8 MF 77 (IDFM livery), 13 MF 77 (RATP jade), 7bis MF 88 (3, MF 19 from 14 Dec 2026), 11 MP 14 CC (5), 14 MP 14 (8).
+- Decisions: line 4 has no majority stock (MP 89 CA 21, MP 14 20 + 4 ordered, MP 05 11): MP 14 drawn. Line 10 drawn as MF 67 (25) though MF 19 (7) is arriving. Line 8 drawn in IDFM livery (44 of 62 trains renovated).
+- `train-mesh.ts` is now one builder driven by the spec in `stock.ts`: width, height, floor, upright or inclined sides, car pitch, doors (count, width), gangways or separate cars (walls + coupler), rubber tyres or steel wheels, raked windscreen (setback from the waist up), livery (skirt, bands, window strip, door colours, face mask, LED frame or painted outline). The MP 14 keeps its exact numbers.
+- Sourced: lengths, widths, heights, door counts and widths (except MF 01 door width and MF 88 height), gangways, tyres. Estimated: livery colours and band heights (Wikipedia describes them in words only, some only from memory), nose rake, window layout. Check against photos before calling them exact.
+- Checked: one train per line opens with its stock, car count and length (new E2E test); close-ups of each stock family looked at; extruded model still shown when the mesh chunk cannot load (test blocks it).
+- Not done: MF 19 (lines 7bis from 14 Dec 2026, 10 from 2027), MP 89 CA / MP 05 mix of line 4, distinct MP 89 CC cab vs CA panoramic end, per-train stock (the feed does not say), a check on a phone.
 
 ## Status
-- 28 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM, the MP 14 mesh.
+- 29 E2E tests (desktop + mobile): map, real time against a real capture, relay against a fake PRIM, the rolling stock of every line.
 
 ## Next
+- Mid-December 2026: switch 7bis to MF 19 (4 cars, IDFM livery); 2027: line 10.
 - Later: RER/tram; PRIM disruptions on the line view.
 - If the AWS session expires: sign in again with the `--remote` command above before running `relay/aws/deploy.sh`.

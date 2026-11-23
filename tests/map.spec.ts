@@ -67,7 +67,10 @@ test("a station board lists upcoming arrivals and departures", async ({ page }, 
 test("clicking a train on the map opens its run", async ({ page }) => {
   const date = await pickWeekday(page);
   await open(page, `date=${date}&time=08:30&paused`);
-  await page.waitForTimeout(500);
+  // Under load the first frame with trains can take a while: wait for one.
+  await expect
+    .poll(() => page.evaluate(() => (window as any).metro.map.queryRenderedFeatures({ layers: ["trains"] }).length))
+    .toBeGreaterThan(0);
   const point = await page.evaluate(() => {
     const m = (window as any).metro;
     const f = m.map.queryRenderedFeatures({ layers: ["trains"] })[0];
@@ -204,6 +207,9 @@ test("zoomed in, trains are 3D boxes drawn to scale along the track", async ({ p
 
 test("the map is tilted in 3D, can go flat, and a clicked train flies in as a detailed model", async ({ page }, info) => {
   test.slow(); // 3D under software WebGL
+  // Every line has a rolling-stock mesh: the extruded model is what a train
+  // shows when the mesh code cannot be fetched (offline, blocked chunk).
+  await page.route(/train-mesh[^/]*\.js/, (route) => route.abort());
   const date = await pickWeekday(page);
   await open(page, `date=${date}&time=08:30&paused`);
   const m = () => page.evaluate(() => ({ pitch: (window as any).metro.map.getPitch(), zoom: (window as any).metro.map.getZoom() }));
@@ -217,7 +223,6 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
 
   const id = await page.evaluate(() => {
     const metro = (window as any).metro;
-    // Line 7 has no rolling-stock mesh: its trains keep the extruded model.
     const line = metro.schedule.network.lines.findIndex((l: any) => l.id === "7");
     const r = metro.running().find((x: any) => x.line === line);
     metro.select({ kind: "train", id: r.id });
@@ -239,6 +244,47 @@ test("the map is tilted in 3D, can go flat, and a clicked train flies in as a de
   expect(await page.evaluate(() => (window as any).metro.state.mesh)).toBeNull();
   await page.waitForTimeout(2000);
   await page.screenshot({ path: info.outputPath("train-3d.png") });
+});
+
+// Every line opens as the stock that runs most of its service in November 2026
+// (src/stock.ts): right model, right number of cars, train length to scale.
+test("every line opens as its own rolling stock", async ({ page }) => {
+  test.slow(); // sixteen meshes under software WebGL
+  const expected: Record<string, [string, number, number]> = {
+    "1": ["MP 05", 6, 90.3],
+    "2": ["MF 01", 5, 75.8],
+    "3": ["MF 67", 5, 75.4],
+    "3B": ["MF 67", 3, 45.81],
+    "4": ["MP 14", 6, 90.24],
+    "5": ["MF 01", 5, 75.8],
+    "6": ["MP 89 CC", 5, 75.25],
+    "7": ["MF 77", 5, 77.4],
+    "7B": ["MF 88", 3, 46.44],
+    "8": ["MF 77", 5, 77.4],
+    "9": ["MF 01", 5, 75.8],
+    "10": ["MF 67", 5, 75.4],
+    "11": ["MP 14", 5, 75.2],
+    "12": ["MF 67", 5, 75.4],
+    "13": ["MF 77", 5, 77.4],
+    "14": ["MP 14", 8, 120.32],
+  };
+  const date = await pickWeekday(page);
+  await open(page, `date=${date}&time=08:30&paused`);
+  const lines: string[] = await page.evaluate(() => (window as any).metro.schedule.network.lines.map((l: any) => l.id));
+  expect(lines.sort()).toEqual(Object.keys(expected).sort());
+  for (const line of lines) {
+    const id = await page.evaluate((lid) => {
+      const metro = (window as any).metro;
+      const li = metro.schedule.network.lines.findIndex((l: any) => l.id === lid);
+      const r = metro.running().find((x: any) => x.line === li);
+      metro.select({ kind: "train", id: r.id });
+      return r.id;
+    }, line);
+    const [stock, cars, length] = expected[line];
+    await expect
+      .poll(() => page.evaluate(() => (window as any).metro.state.mesh), { timeout: 20_000, message: `line ${line}` })
+      .toEqual({ id, stock, cars, length });
+  }
 });
 
 // Real rolling stock. Expected, for a line whose stock is modelled (line 14, MP 14):

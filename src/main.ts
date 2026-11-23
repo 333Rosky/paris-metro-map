@@ -21,6 +21,8 @@ const FONT = ["Noto Sans Regular"];
 /** Train length in metres by line (cars × ~15 m); bodies are drawn to scale. */
 const TRAIN_LENGTH: Record<string, number> = { "1": 90, "4": 90, "14": 120, "3B": 45, "7B": 45 };
 const DEFAULT_TRAIN_LENGTH = 75;
+/** Same length for the box and the mesh: the modelled stock wins. */
+const trainLength = (line: string) => (STOCK[line] ? stockLength(STOCK[line]) : (TRAIN_LENGTH[line] ?? DEFAULT_TRAIN_LENGTH));
 /** Below this zoom a train is shorter than its dot: bodies are not built. */
 const BODY_ZOOM = 12.5;
 /** Camera tilt of the 3D view, and when a train is opened. */
@@ -883,7 +885,7 @@ async function main() {
       points.push({ type: "Feature" as const, properties, geometry: { type: "Point" as const, coordinates: [lon, lat] } });
       if (sel) followed = [lon, lat, heading];
       if (!withBodies) continue;
-      const length = TRAIN_LENGTH[line.id] ?? DEFAULT_TRAIN_LENGTH;
+      const length = trainLength(line.id);
       if (mesh && stock) {
         mesh.show(r.id, stock, shape, r.dist, zoom);
         trainFootprint(parts, shape, r.dist, stockLength(stock), zoom, r.id);
