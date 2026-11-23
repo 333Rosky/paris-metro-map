@@ -791,3 +791,18 @@ dialog#key-dialog::backdrop {
   letter-spacing: 0.02em;
   color: #222;
 }
+
+/* Map buttons (2D/3D, zoom, compass) and attribution move aside while the
+   info panel is open, instead of sitting under it. */
+.maplibregl-ctrl-bottom-right {
+  transition: right 0.2s ease, bottom 0.2s ease;
+}
+body:has(#info:not([hidden])) .maplibregl-ctrl-bottom-right {
+  right: 384px; /* panel width 360 + its 16 px margin + 8 px gap */
+}
+@media (max-width: 640px) {
+  body:has(#info:not([hidden])) .maplibregl-ctrl-bottom-right {
+    right: 0;
+    bottom: calc(46% + 12px); /* above the bottom sheet (max-height 46%) */
+  }
+}
